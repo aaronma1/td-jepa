@@ -1,0 +1,21 @@
+[setup] env=pointmaze-medium-navigate-v0  device=cuda  seed=0
+[setup] obs_dim=2  action_dim=2  d_z=50
+[setup] dataset size: 1,000,000 transitions
+[setup] dataset tensors: obs=torch.Size([1000000, 2])  discount range=[0.00, 0.99]
+[setup] total params: 6,030,126
+[   2000/300000] (  62 sps)  td_loss=+34.2456  reg_loss=+66.6444  actor_loss=-0.2517  bc_loss=+0.5362  q_mean=+11.4173
+[   4000/300000] (  62 sps)  td_loss=+205.3846  reg_loss=+6.3723  actor_loss=-0.4718  bc_loss=+0.5436  q_mean=+49.7762
+[   6000/300000] (  63 sps)  td_loss=+547.0347  reg_loss=+20.8226  actor_loss=-0.5936  bc_loss=+0.5378  q_mean=+104.7702
+[   8000/300000] (  63 sps)  td_loss=+781.4300  reg_loss=+38.5248  actor_loss=-0.6770  bc_loss=+0.5293  q_mean=+163.6324
+[  10000/300000] (  63 sps)  td_loss=+899.7687  reg_loss=+49.5132  actor_loss=-0.7271  bc_loss=+0.5147  q_mean=+222.0849
+[  12000/300000] (  63 sps)  td_loss=+1025.7713  reg_loss=+56.4631  actor_loss=-0.7568  bc_loss=+0.4994  q_mean=+270.1619
+[  14000/300000] (  63 sps)  td_loss=+1187.4351  reg_loss=+59.6718  actor_loss=-0.7743  bc_loss=+0.4849  q_mean=+313.8374
+[  16000/300000] (  63 sps)  td_loss=+1312.2365  reg_loss=+60.6524  actor_loss=-0.7822  bc_loss=+0.4739  q_mean=+344.9574
+[  18000/300000] (  63 sps)  td_loss=+1362.2712  reg_loss=+59.9254  actor_loss=-0.7893  bc_loss=+0.4627  q_mean=+372.8858
+[  20000/300000] (  63 sps)  td_loss=+1451.5046  reg_loss=+58.9948  actor_loss=-0.7928  bc_loss=+0.4565  q_mean=+395.4469
+            >> zero-shot  mean=0.000  [t1=0.00, t2=0.00, t3=0.00, t4=0.00, t5=0.00]
+[  22000/300000] (  60 sps)  td_loss=+1559.1247  reg_loss=+58.3932  actor_loss=-0.7966  bc_loss=+0.4490  q_mean=+417.2247
+[  24000/300000] (  61 sps)  td_loss=+1593.8810  reg_loss=+57.6391  actor_loss=-0.7980  bc_loss=+0.4410  q_mean=+430.6800
+[  26000/300000] (  61 sps)  td_loss=+1667.5053  reg_loss=+57.1103  actor_loss=-0.7978  bc_loss=+0.4373  q_mean=+439.6310
+[  28000/300000] (  61 sps)  td_loss=+1815.8823  reg_loss=+56.6942  actor_loss=-0.7983  bc_loss=+0.4320  q_mean=+451.8505
+[  30000/300000] (  61 sps)  td_loss=+1799.6541  reg_loss=+56.9012  actor_loss=-0.7970  bc_loss=+0.4273  q_mean=+458.2940

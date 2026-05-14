@@ -1,0 +1,84 @@
+[setup] env=pointmaze-medium-navigate-v0  device=cuda  seed=0
+[setup] obs_dim=2  action_dim=2  d_z=50
+[setup] dataset size: 1,000,000 transitions
+[setup] dataset tensors: obs=torch.Size([1000000, 2])  discount range=[0.00, 0.99]
+[setup] total params: 6,030,126
+[   2000/300000] (  64 sps)  td_loss=+32.4859  reg_loss=+64.0004  actor_loss=-0.2738  bc_loss=+0.5403  q_mean=+13.0573
+[   4000/300000] (  65 sps)  td_loss=+193.9859  reg_loss=+4.3065  actor_loss=-0.5094  bc_loss=+0.5498  q_mean=+57.0427
+[   6000/300000] (  65 sps)  td_loss=+460.5253  reg_loss=+12.7846  actor_loss=-0.6318  bc_loss=+0.5336  q_mean=+117.4139
+[   8000/300000] (  65 sps)  td_loss=+639.6424  reg_loss=+22.2649  actor_loss=-0.6949  bc_loss=+0.5182  q_mean=+176.1413
+[  10000/300000] (  65 sps)  td_loss=+879.1350  reg_loss=+30.9549  actor_loss=-0.7284  bc_loss=+0.5038  q_mean=+221.3675
+[  12000/300000] (  65 sps)  td_loss=+1103.2587  reg_loss=+37.4138  actor_loss=-0.7547  bc_loss=+0.4909  q_mean=+267.9312
+[  14000/300000] (  65 sps)  td_loss=+1271.3459  reg_loss=+39.7658  actor_loss=-0.7694  bc_loss=+0.4779  q_mean=+306.4614
+[  16000/300000] (  65 sps)  td_loss=+1415.2898  reg_loss=+40.1418  actor_loss=-0.7778  bc_loss=+0.4683  q_mean=+338.0688
+[  18000/300000] (  65 sps)  td_loss=+1543.8703  reg_loss=+40.5760  actor_loss=-0.7843  bc_loss=+0.4592  q_mean=+363.4900
+[  20000/300000] (  65 sps)  td_loss=+1726.5886  reg_loss=+41.5652  actor_loss=-0.7896  bc_loss=+0.4521  q_mean=+386.2286
+            >> zero-shot  mean=0.000  [t1=0.00, t2=0.00, t3=0.00, t4=0.00, t5=0.00]
+[  22000/300000] (  62 sps)  td_loss=+1848.5702  reg_loss=+41.7494  actor_loss=-0.7940  bc_loss=+0.4444  q_mean=+409.1329
+[  24000/300000] (  62 sps)  td_loss=+1917.1690  reg_loss=+41.6753  actor_loss=-0.7952  bc_loss=+0.4375  q_mean=+424.1063
+[  26000/300000] (  62 sps)  td_loss=+1991.3966  reg_loss=+42.1304  actor_loss=-0.7985  bc_loss=+0.4305  q_mean=+443.1025
+[  28000/300000] (  63 sps)  td_loss=+2263.3793  reg_loss=+42.2188  actor_loss=-0.7994  bc_loss=+0.4261  q_mean=+459.4769
+[  30000/300000] (  63 sps)  td_loss=+2315.0943  reg_loss=+42.6003  actor_loss=-0.7997  bc_loss=+0.4219  q_mean=+470.8722
+[  32000/300000] (  63 sps)  td_loss=+2386.0374  reg_loss=+42.3702  actor_loss=-0.8001  bc_loss=+0.4167  q_mean=+481.1945
+[  34000/300000] (  63 sps)  td_loss=+2470.3323  reg_loss=+42.0246  actor_loss=-0.8010  bc_loss=+0.4124  q_mean=+492.9981
+[  36000/300000] (  63 sps)  td_loss=+2621.5911  reg_loss=+40.8798  actor_loss=-0.7998  bc_loss=+0.4089  q_mean=+501.5937
+[  38000/300000] (  63 sps)  td_loss=+2654.9333  reg_loss=+40.4234  actor_loss=-0.7994  bc_loss=+0.4060  q_mean=+507.1661
+[  40000/300000] (  63 sps)  td_loss=+2875.3505  reg_loss=+39.9793  actor_loss=-0.7991  bc_loss=+0.4026  q_mean=+512.9366
+            >> zero-shot  mean=0.000  [t1=0.00, t2=0.00, t3=0.00, t4=0.00, t5=0.00]
+[  42000/300000] (  62 sps)  td_loss=+2779.0675  reg_loss=+39.1248  actor_loss=-0.7980  bc_loss=+0.4012  q_mean=+517.0242
+[  44000/300000] (  62 sps)  td_loss=+2949.8409  reg_loss=+38.9997  actor_loss=-0.7975  bc_loss=+0.3993  q_mean=+520.7555
+[  46000/300000] (  62 sps)  td_loss=+3007.0675  reg_loss=+38.8322  actor_loss=-0.7948  bc_loss=+0.3983  q_mean=+520.5176
+[  48000/300000] (  62 sps)  td_loss=+3045.8624  reg_loss=+38.6895  actor_loss=-0.7964  bc_loss=+0.3962  q_mean=+523.8154
+[  50000/300000] (  62 sps)  td_loss=+3039.2827  reg_loss=+38.4723  actor_loss=-0.7967  bc_loss=+0.3935  q_mean=+527.0469
+[  52000/300000] (  62 sps)  td_loss=+3155.7345  reg_loss=+38.5218  actor_loss=-0.7965  bc_loss=+0.3908  q_mean=+524.8881
+[  54000/300000] (  63 sps)  td_loss=+3257.0494  reg_loss=+38.1462  actor_loss=-0.7956  bc_loss=+0.3894  q_mean=+527.0752
+[  56000/300000] (  63 sps)  td_loss=+3423.9363  reg_loss=+37.7011  actor_loss=-0.7974  bc_loss=+0.3876  q_mean=+527.5595
+[  58000/300000] (  63 sps)  td_loss=+3311.0336  reg_loss=+37.2534  actor_loss=-0.7977  bc_loss=+0.3839  q_mean=+528.3256
+[  60000/300000] (  63 sps)  td_loss=+3137.3143  reg_loss=+37.0908  actor_loss=-0.7978  bc_loss=+0.3814  q_mean=+527.3219
+            >> zero-shot  mean=0.000  [t1=0.00, t2=0.00, t3=0.00, t4=0.00, t5=0.00]
+[  62000/300000] (  62 sps)  td_loss=+3348.1844  reg_loss=+36.8774  actor_loss=-0.8008  bc_loss=+0.3787  q_mean=+532.1622
+[  64000/300000] (  62 sps)  td_loss=+3261.5070  reg_loss=+36.6346  actor_loss=-0.8037  bc_loss=+0.3755  q_mean=+535.0835
+[  66000/300000] (  62 sps)  td_loss=+3181.0803  reg_loss=+36.0396  actor_loss=-0.8042  bc_loss=+0.3717  q_mean=+534.3428
+[  68000/300000] (  62 sps)  td_loss=+3280.5675  reg_loss=+35.3544  actor_loss=-0.8060  bc_loss=+0.3682  q_mean=+537.4042
+[  70000/300000] (  62 sps)  td_loss=+3274.9519  reg_loss=+35.2209  actor_loss=-0.8093  bc_loss=+0.3683  q_mean=+542.9993
+[  72000/300000] (  62 sps)  td_loss=+3367.2963  reg_loss=+34.8820  actor_loss=-0.8133  bc_loss=+0.3641  q_mean=+548.0512
+[  74000/300000] (  62 sps)  td_loss=+3249.7775  reg_loss=+34.5350  actor_loss=-0.8179  bc_loss=+0.3609  q_mean=+552.7510
+[  76000/300000] (  62 sps)  td_loss=+3099.7110  reg_loss=+34.0826  actor_loss=-0.8188  bc_loss=+0.3610  q_mean=+554.9384
+[  78000/300000] (  62 sps)  td_loss=+3215.2877  reg_loss=+34.2368  actor_loss=-0.8226  bc_loss=+0.3586  q_mean=+562.7781
+[  80000/300000] (  63 sps)  td_loss=+3144.4438  reg_loss=+33.2606  actor_loss=-0.8237  bc_loss=+0.3580  q_mean=+565.3998
+            >> zero-shot  mean=0.000  [t1=0.00, t2=0.00, t3=0.00, t4=0.00, t5=0.00]
+[  82000/300000] (  62 sps)  td_loss=+3198.6546  reg_loss=+32.6696  actor_loss=-0.8273  bc_loss=+0.3565  q_mean=+570.6578
+[  84000/300000] (  62 sps)  td_loss=+3031.8096  reg_loss=+32.0857  actor_loss=-0.8279  bc_loss=+0.3550  q_mean=+573.6890
+[  86000/300000] (  62 sps)  td_loss=+3229.7543  reg_loss=+31.4524  actor_loss=-0.8286  bc_loss=+0.3538  q_mean=+576.3057
+[  88000/300000] (  62 sps)  td_loss=+3004.4430  reg_loss=+30.9373  actor_loss=-0.8304  bc_loss=+0.3528  q_mean=+578.3571
+[  90000/300000] (  62 sps)  td_loss=+3097.2766  reg_loss=+30.5192  actor_loss=-0.8315  bc_loss=+0.3516  q_mean=+582.4494
+[  92000/300000] (  62 sps)  td_loss=+3059.3110  reg_loss=+30.2867  actor_loss=-0.8338  bc_loss=+0.3486  q_mean=+585.9719
+[  94000/300000] (  62 sps)  td_loss=+3161.6373  reg_loss=+30.0041  actor_loss=-0.8356  bc_loss=+0.3472  q_mean=+588.3682
+[  96000/300000] (  62 sps)  td_loss=+3160.1042  reg_loss=+29.1871  actor_loss=-0.8371  bc_loss=+0.3457  q_mean=+590.2498
+[  98000/300000] (  62 sps)  td_loss=+2987.1487  reg_loss=+28.6295  actor_loss=-0.8389  bc_loss=+0.3438  q_mean=+595.1245
+[ 100000/300000] (  62 sps)  td_loss=+3149.5940  reg_loss=+28.3150  actor_loss=-0.8392  bc_loss=+0.3441  q_mean=+595.5643
+            >> zero-shot  mean=0.000  [t1=0.00, t2=0.00, t3=0.00, t4=0.00, t5=0.00]
+[ 102000/300000] (  62 sps)  td_loss=+3135.6517  reg_loss=+27.8290  actor_loss=-0.8406  bc_loss=+0.3434  q_mean=+602.0278
+[ 104000/300000] (  62 sps)  td_loss=+3109.9660  reg_loss=+27.0644  actor_loss=-0.8418  bc_loss=+0.3404  q_mean=+603.7561
+[ 106000/300000] (  62 sps)  td_loss=+3208.5707  reg_loss=+26.5211  actor_loss=-0.8413  bc_loss=+0.3426  q_mean=+605.5214
+[ 108000/300000] (  62 sps)  td_loss=+3044.3278  reg_loss=+26.1800  actor_loss=-0.8427  bc_loss=+0.3406  q_mean=+609.3995
+[ 110000/300000] (  62 sps)  td_loss=+3166.2827  reg_loss=+25.3697  actor_loss=-0.8438  bc_loss=+0.3401  q_mean=+611.1672
+[ 112000/300000] (  62 sps)  td_loss=+3264.5011  reg_loss=+24.7261  actor_loss=-0.8444  bc_loss=+0.3394  q_mean=+615.7601
+[ 114000/300000] (  62 sps)  td_loss=+3280.1604  reg_loss=+24.1797  actor_loss=-0.8449  bc_loss=+0.3406  q_mean=+620.9107
+[ 116000/300000] (  62 sps)  td_loss=+3253.6496  reg_loss=+23.3767  actor_loss=-0.8461  bc_loss=+0.3399  q_mean=+627.3463
+[ 118000/300000] (  62 sps)  td_loss=+3064.9012  reg_loss=+22.8544  actor_loss=-0.8475  bc_loss=+0.3379  q_mean=+629.9550
+[ 120000/300000] (  62 sps)  td_loss=+3136.0552  reg_loss=+22.2040  actor_loss=-0.8486  bc_loss=+0.3377  q_mean=+636.7231
+            >> zero-shot  mean=0.020  [t1=0.00, t2=0.00, t3=0.00, t4=0.00, t5=0.10]
+[ 122000/300000] (  62 sps)  td_loss=+3153.3377  reg_loss=+21.8053  actor_loss=-0.8496  bc_loss=+0.3363  q_mean=+640.9560
+[ 124000/300000] (  62 sps)  td_loss=+3123.8569  reg_loss=+21.0684  actor_loss=-0.8505  bc_loss=+0.3358  q_mean=+645.1994
+[ 126000/300000] (  62 sps)  td_loss=+2940.8701  reg_loss=+20.4758  actor_loss=-0.8513  bc_loss=+0.3329  q_mean=+644.6108
+[ 128000/300000] (  62 sps)  td_loss=+2941.7219  reg_loss=+19.9904  actor_loss=-0.8511  bc_loss=+0.3347  q_mean=+647.7898
+[ 130000/300000] (  62 sps)  td_loss=+3072.9300  reg_loss=+19.5799  actor_loss=-0.8515  bc_loss=+0.3351  q_mean=+650.3200
+[ 132000/300000] (  62 sps)  td_loss=+3115.0257  reg_loss=+19.1637  actor_loss=-0.8522  bc_loss=+0.3350  q_mean=+652.4082
+[ 134000/300000] (  62 sps)  td_loss=+2962.0521  reg_loss=+18.4113  actor_loss=-0.8508  bc_loss=+0.3347  q_mean=+651.9694
+[ 136000/300000] (  62 sps)  td_loss=+2959.4522  reg_loss=+17.6646  actor_loss=-0.8515  bc_loss=+0.3341  q_mean=+653.2711
+[ 138000/300000] (  62 sps)  td_loss=+3173.1784  reg_loss=+17.2575  actor_loss=-0.8509  bc_loss=+0.3343  q_mean=+650.5456
+[ 140000/300000] (  62 sps)  td_loss=+3021.6920  reg_loss=+16.4747  actor_loss=-0.8508  bc_loss=+0.3336  q_mean=+647.7377
+            >> zero-shot  mean=0.000  [t1=0.00, t2=0.00, t3=0.00, t4=0.00, t5=0.00]
+[ 142000/300000] (  62 sps)  td_loss=+3111.7374  reg_loss=+15.9897  actor_loss=-0.8509  bc_loss=+0.3332  q_mean=+648.2405
+[ 144000/300000] (  62 sps)  td_loss=+3093.9971  reg_loss=+15.6598  actor_loss=-0.8528  bc_loss=+0.3315  q_mean=+651.7823
