@@ -1,23 +1,3 @@
-"""Train TD-JEPA (v2) on OGBench antmaze-medium-navigate-v0 (proprio).
-
-Matches the OGBench-proprio config from the reference repo's
-``scripts/train/proprio/launch_td_jepa_ogbench.py`` ``sweep_antmaze`` sweep:
-1M steps, batch 256, gamma 0.99, bc_coeff 0.3, ortho coefs 1.0 (psi can go 0.1),
-phi_dim = psi_dim = 50, encoder hidden 512 / 4 layers, predictor hidden 512 /
-2 layers, actor takes raw obs (actor_use_full_encoder=False).
-
-Reward inference matches the reference's ``ogbench_reward_eval``: sample N
-buffer transitions, compute the task's true reward at each (sparse: +1 inside
-the goal radius, 0 outside), shift by +1 to match the published numbers, then
-least-squares onto ``psi(next_obs)``.
-
-Example
--------
-    pip install ogbench torch
-    python train_v2.py
-    # or for the harder large variant:
-    python train_v2.py --env_name antmaze-large-navigate-v0
-"""
 from __future__ import annotations
 
 import argparse

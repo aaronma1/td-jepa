@@ -1,34 +1,3 @@
-"""TD-JEPA reimplementation matching the official facebookresearch/td_jepa code.
-
-Reference: https://github.com/facebookresearch/td_jepa  (metamotivo/agents/td_jepa/)
-
-Key faithful pieces of the reference that the earlier sketch got wrong:
-
-* Both phi and psi encoders end in an L2-normalisation that rescales the output
-  to ``sqrt(d_z)``.  This is what keeps the orthonormality regulariser bounded:
-  with ‖phi(s)‖ constant, ``-diag(Cov).mean()`` is a constant ``-d_z`` and only
-  the off-diagonal term is an active learning signal.  Without this, the diag
-  term has no lower bound and the regulariser explodes.
-* phi_dim = psi_dim = 50 by default.  The asymmetry is about *content*, not
-  dimensionality.
-* The TD loss is ``(pred - target).pow(2).sum(-1).mean()`` -- summed over the
-  feature dimension, averaged over batch.  Not ``F.mse_loss`` which would
-  additionally divide by d_z and make the regulariser dominate.
-* Predictor architecture: two embedding heads, ``(state, z)`` and
-  ``(state, action)``, concatenated into a body.  State appears in *both*
-  branches.  Ensemble of 2 parallel predictors, averaged for targets.
-* Actor BC normalisation: ``actor_loss = (-Q.mean() / |Q|.detach()) + bc_coeff * bc_mse``.
-  The ``-Q/|Q|`` term has magnitude ~1 so ``bc_coeff`` in [0.3, 3.0] is sensible.
-* Running ``z_cov`` (EMA of ``z.T @ z / batch``) used to whiten goal-sampled z's
-  before projecting onto the sphere.
-* Actor input is the raw observation (proprio) for OGBench, not phi(s).
-
-The single-predictor / Gaussian-actor / TruncatedNormal version implemented here
-matches ``TDJEPAAgent`` in the reference (the DMC default).  For OGBench
-manipulation tasks the reference switches to ``TDJEPAFlowBCAgent`` with a
-noise-conditioned flow-matching actor; that's a larger change and not included
-here, but the rest of the agent is identical.
-"""
 from __future__ import annotations
 
 import copy
