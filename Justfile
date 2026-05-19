@@ -12,5 +12,6 @@ run-pointmaze:
      --pred_n_hidden 2 \
      --actor_use_full_encoder \
      --bc_coeff 0.0 \
-     --eval_every 1000 \
-     --log_every 100
+     --eval_every 10000 \
+     --log_every 1000 \
+     --center_reward

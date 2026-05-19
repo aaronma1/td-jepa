@@ -258,7 +258,7 @@ class TDJEPA:
         ).to(device)
 
 
-        self.inverse_dynamics_predictor = BackwardMap(2*phi_dim, action_dim, hidden_dim=256, n_hidden=2).to(device)
+        self.inverse_dynamics_predictor = nn.Sequential(nn.Linear(2*phi_dim, action_dim)).to(device)
         self.inverse_dynamics_coef = 0.1
 
 
@@ -424,18 +424,18 @@ class TDJEPA:
         Q = Qs.mean(dim=0)                                            # (B,)
         actor_loss = -Q.mean()
 
-        bc_err = torch.zeros((), device=self.device)
-        if self.bc_coeff > 0:
-            bc_err = F.mse_loss(actor_action, act)
+       #bc_err = torch.zeros((), device=self.device)
+        #if self.bc_coeff > 0:
+            #bc_err = F.mse_loss(actor_action, act)
             # Crucial scaling: normalise the Q term, then add BC -- matches reference.
-            actor_loss = (actor_loss / Qs.abs().mean().detach()) + self.bc_coeff * bc_err
+            #actor_loss = (actor_loss / Qs.abs().mean().detach()) + self.bc_coeff * bc_err
 
         self.opt_actor.zero_grad(set_to_none=True)
         actor_loss.backward()
         self.opt_actor.step()
         return {
             "actor_loss": actor_loss.item(),
-            "bc_err": bc_err.item() if self.bc_coeff > 0 else 0.0,
+            "bc_err": 0.0 if self.bc_coeff > 0 else 0.0,
             "q_mean": Q.mean().item(),
         }
 
@@ -472,7 +472,7 @@ class TDJEPA:
         self.T_psi.to(eval_device)
         self.actor.to(eval_device)
     
-    def train(self):
+    def train_mode(self):
         self.phi.to(self.device)
         self.psi.to(self.device)
         self.T_phi.to(self.device)
