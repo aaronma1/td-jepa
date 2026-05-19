@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 import ogbench
+import tqdm
 
 from td_jepa_inverse_dynamics import TDJEPA
 
@@ -89,8 +90,8 @@ def infer_z_for_task(
     tiny (e.g. <50 out of 10k), the least-squares regression is fitting a
     near-zero target and the inferred z is meaningless.
     """
-    goal_t = torch.as_tensor(goal_xy, dtype=torch.float32, device=agent.device)
-    xy = next_obs_pool[:, :2]                               # ant: first 2 qpos dims are world (x, y)
+    goal_t = torch.as_tensor(goal_xy, dtype=torch.float32, device="cpu")
+    xy = next_obs_pool[:, :2].to("cpu")                               # ant: first 2 qpos dims are world (x, y)
     dist = (xy - goal_t).norm(dim=-1)
     rew = (dist <= tol).float() + shift_reward
     n_pos = int(rew.sum().item() - rew.numel() * shift_reward)
@@ -150,12 +151,13 @@ def evaluate_zero_shot(
     ``center_reward``: if True, mean-center the reward before lstsq inference.
     Removes the constant-reward component that gets absorbed by ``mean(psi)``.
     """
+    agent.eval_mode()
     tol = GOAL_TOL[morph]
     out: Dict[int, float] = {}
 
     n = min(num_inference_samples, next_obs_pool.shape[0])
     pool_idx = torch.randperm(next_obs_pool.shape[0], device=agent.device)[:n]
-    pool = next_obs_pool[pool_idx]
+    pool = next_obs_pool[pool_idx].clone().to("cpu")
 
     if verbose:
         psi_pool = agent.psi(pool)                          # (N, d_psi)
@@ -186,10 +188,10 @@ def evaluate_zero_shot(
         diag_per_task[task_id] = diag
 
         ok = 0
-        for _ in range(num_episodes):
+        for _ in tqdm.tqdm(range(num_episodes)):
             obs, info = env.reset(options=dict(task_id=task_id, render_goal=False))
             for _ in range(max_steps):
-                o_t = torch.as_tensor(obs, dtype=torch.float32, device=agent.device).unsqueeze(0)
+                o_t = torch.as_tensor(obs, dtype=torch.float32, device="cpu").unsqueeze(0)
                 a = agent.act(o_t, z, deterministic=True).cpu().numpy().squeeze(0)
                 obs, _, term, trunc, info = env.step(a)
                 if float(info.get("success", 0.0)) > 0.5:
@@ -202,7 +204,7 @@ def evaluate_zero_shot(
     if verbose:
         _print_z_geometry(z_per_task)
         _print_predictor_z_sensitivity(agent, next_obs_pool, z_per_task)
-
+    agent.train_mode()
     return out
 
 
@@ -240,13 +242,13 @@ def _print_predictor_z_sensitivity(
     ``spread / |Q|`` is tiny (<5%), the predictor collapsed -- Q is essentially
     z-independent and the actor cannot extract distinct policies per task.
     """
-    idx = torch.randperm(next_obs_pool.shape[0], device=agent.device)[:n_states]
-    s = next_obs_pool[idx]
+    idx = torch.randperm(next_obs_pool.shape[0], device="cpu")[:n_states]
+    s = next_obs_pool[idx].to("cpu")
     phi_s = agent.phi(s)
 
     # Build set of z's: each task's z plus a few uniform-sphere samples
     zs = list(z_per_task.values())
-    z_rand = agent._sample_z(n_random_zs, psi_next=None)
+    z_rand = agent._sample_z(n_random_zs, psi_next=None).to("cpu")
     for k in range(n_random_zs):
         zs.append(z_rand[k:k + 1])
 

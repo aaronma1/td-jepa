@@ -376,12 +376,10 @@ class TDJEPA:
 
         #NEW!: add a small inverse dynamics predictor.
         phi_next = self.phi(nxt)
-        action = self.inverse_dynamics_predictor(torch.cat([phi_enc, phi_next], dim=-1))
-        inverse_dynamics_loss = F.mse_loss(action, act)
+        act_pred = self.inverse_dynamics_predictor(torch.cat([phi_enc, phi_next], dim=-1))
+        inverse_dynamics_loss = F.mse_loss(act_pred, act)
         
-
         total = td_loss + self.phi_ortho_coef * phi_orth + self.psi_ortho_coef * psi_orth + self.inverse_dynamics_coef * inverse_dynamics_loss
-
         for opt in (self.opt_phi, self.opt_psi, self.opt_T_phi, self.opt_T_psi):
             opt.zero_grad(set_to_none=True)
         total.backward()
@@ -465,3 +463,18 @@ class TDJEPA:
         actor_in = self.phi(obs) if self.actor_use_full_encoder else obs
         dist = self.actor(actor_in, z, self.actor_std)
         return dist.mean if deterministic else dist.sample(clip=self.stddev_clip)
+    
+
+    def eval_mode(self, eval_device: str = "cpu"):
+        self.phi.to(eval_device)
+        self.psi.to(eval_device)
+        self.T_phi.to(eval_device)
+        self.T_psi.to(eval_device)
+        self.actor.to(eval_device)
+    
+    def train(self):
+        self.phi.to(self.device)
+        self.psi.to(self.device)
+        self.T_phi.to(self.device)
+        self.T_psi.to(self.device)
+        self.actor.to(self.device)
