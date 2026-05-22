@@ -18,15 +18,39 @@ def default_config(env_name):
 
 
 # Buffer and datasets
+# class Buffer:
+#     def __init__(self, s, a, s_prime, terminals, device="cuda"):
+#         self.s = s.to(device)
+#         self.a = a.to(device)
+#         self.s_prime = s_prime.to(device)
+#         self.terminals = terminals
+
+
+#     def sample_batch(self, batch_size):
+#         idx = torch.randint(0, self.s.shape[0], (batch_size,))
+#         return self.s[idx], self.a[idx], self.s_prime[idx], self.terminals[idx]
 class Buffer:
     def __init__(self, s, a, s_prime, terminals, device="cuda"):
         self.s = s.to(device)
         self.a = a.to(device)
         self.s_prime = s_prime.to(device)
-        self.terminals = terminals
+        self.terminals = terminals.to(device)
+
+        self.n = self.s.shape[0]
+        self.perm = None
+        self.ptr = 0
+
+    def reset_permutation(self):
+        self.perm = torch.randperm(self.n, device=self.s.device)
+        self.ptr = 0
 
     def sample_batch(self, batch_size):
-        idx = torch.randint(0, self.s.shape[0], (batch_size,))
+        if self.perm is None or self.ptr + batch_size > self.n:
+            self.reset_permutation()
+
+        idx = self.perm[self.ptr : self.ptr + batch_size]
+        self.ptr += batch_size
+
         return self.s[idx], self.a[idx], self.s_prime[idx], self.terminals[idx]
 
 
@@ -75,6 +99,10 @@ def train_env(args, config=None):
             )
             print(f"[{step:>7d}/{args.total_steps}] ({sps:>4.0f} sps)  {msg}")
             log_buf = {k: 0.0 for k in log_buf.keys()}
+
+
+def evaluate_zero_shot(env_name, agent):
+    pass
 
 
 if __name__ == "__main__":

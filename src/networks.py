@@ -24,7 +24,7 @@ def _build_mlp(
     layers.append(torch.nn.Linear(last_dim, output_dim))
     for m in layers:
         if isinstance(m, torch.nn.Linear):
-            torch.nn.init.orthogonal(m.weight, gain=1.0)
+            torch.nn.init.orthogonal_(m.weight, gain=1.0)
             torch.nn.init.zeros_(m.bias)
 
     return torch.nn.Sequential(*layers)
