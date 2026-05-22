@@ -27,3 +27,19 @@ explicit = true
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 torchaudio = { index = "pytorch" }
+
+
+[tool.basedpyright]
+reportPrivateImportUsage = "none"
+reportExplicitAny = "none"
+reportMissingTypeStubs = "none"
+reportUnknownArgumentType = "none"
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownLambdaType = "none"
+reportMissingParameterType = "none"
+reportUnknownParameterType = "none"
+reportUnannotatedClassAttribute = "none"
+reportAny = "none"
+reportUnusedCallResult = "none"
+reportUntypedFunctionDecorator = "none"
