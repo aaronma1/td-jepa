@@ -29,8 +29,9 @@ class TD_JEPA_CONFIG:
         ema_coiff=0.99,
         # other hypers
         gamma=0.99,
-        reg_lambda=1.0,
+        reg_lambda=0.1,
         actor_use_raw_obs=False,
+        actor_bc_coeff=0.3,
         latent_z_batch_size=1,  # (D)
         train_device="cuda",
         eval_device="cpu",
@@ -56,6 +57,7 @@ class TD_JEPA_CONFIG:
         self.gamma = gamma
         self.reg_lambda = reg_lambda
         self.actor_use_raw_obs = actor_use_raw_obs
+        self.actor_bc_coeff = actor_bc_coeff
         self.latent_z_batch_size = latent_z_batch_size
         self.train_device = train_device
         self.eval_device = eval_device
@@ -70,8 +72,8 @@ def _ortho_loss(enc):
     B = enc.shape[0]
     cov = enc @ enc.T
     diag = cov.diag()
-    offdiag = torch.square(cov - torch.diag_embed(diag))
-    return (1 / (2 * B * (B - 1))) * offdiag.sum() - (1 / B) * diag.sum()
+    offdiag = torch.square(cov).sum() - torch.square(diag).sum()
+    return (1 / (2 * B * (B - 1))) * offdiag - (1 / B) * diag.sum()
 
 
 class TD_JEPA:
@@ -156,6 +158,14 @@ class TD_JEPA:
         self.opt_T_phi = torch.optim.Adam(self.T_phi.parameters(), lr=config.T_phi_lr)
         self.opt_T_psi = torch.optim.Adam(self.T_psi.parameters(), lr=config.T_psi_lr)
         self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=config.actor_lr)
+        self.opt_critic = torch.optim.Adam(
+            [
+                {"params": self.phi.parameters(), "lr": config.phi_lr},
+                {"params": self.psi.parameters(), "lr": config.psi_lr},
+                {"params": self.T_phi.parameters(), "lr": config.T_phi_lr},
+                {"params": self.T_psi.parameters(), "lr": config.T_psi_lr},
+            ]
+        )
 
     def train_mode(
         self,
@@ -169,17 +179,18 @@ class TD_JEPA:
 
     @torch.no_grad()
     def _sample_latent_z(self, B):
-
-        z = 2 * torch.rand(B, self.config.psi_dim, device=self.device) - 1
-        z = z / torch.norm(z, dim=-1, keepdim=True)
-
+        z = torch.randn(B, self.config.psi_dim, device=self.device)
+        z = (self.config.phi_dim**0.5) * z / torch.norm(z, dim=-1, keepdim=True)
         return z
 
     def ema(self):
         def _ema(source, target, tau):
             with torch.no_grad():
-                for tp, sp in zip(target.parameters(), source.parameters()):
-                    tp.data.mul_(1.0 - tau).add_(sp.data, alpha=tau)
+                torch._foreach_lerp_(
+                    list(target.parameters()),
+                    list(source.parameters()),
+                    tau,
+                )
 
         tau = 1 - self.config.ema_coiff
         _ema(self.phi, self.phi_t, tau)
@@ -190,13 +201,10 @@ class TD_JEPA:
     @torch.no_grad()
     def compute_td_targets(self, next_states, terminals, z):
         D = self.config.latent_z_batch_size
-
         phi_embed_t = _tile(self.phi_t(next_states), D)
         psi_embed_t = _tile(self.psi_t(next_states), D)
-
         ns = _tile(next_states, D) if self.config.actor_use_raw_obs else phi_embed_t
         next_actions = self.actor.sample_action(ns, z)
-
         bootstrap = 1 - _tile(terminals, D)
         phi_target = psi_embed_t + bootstrap * self.config.gamma * self.T_phi_t(
             phi_embed_t, next_actions, z
@@ -204,7 +212,6 @@ class TD_JEPA:
         psi_target = phi_embed_t + bootstrap * self.config.gamma * self.T_psi_t(
             psi_embed_t, next_actions, z
         )
-
         return phi_target, psi_target
 
     def train_step(self, states, actions, next_states, terminals, log=False):
@@ -225,41 +232,55 @@ class TD_JEPA:
         with torch.no_grad():
             phi_target, psi_target = self.compute_td_targets(next_states, terminals, z)
 
+        # compute losses
         phi_embed = _tile(self.phi(states), D)
         psi_embed = _tile(self.psi(states), D)
+
         F_phi = self.T_phi(phi_embed, _tile(actions, D), z)
         F_psi = self.T_psi(psi_embed, _tile(actions, D), z)
         TD_phi = 0.5 * torch.mean(torch.square(phi_target - F_phi))
         TD_psi = 0.5 * torch.mean(torch.square(psi_target - F_psi))
         Ortho_phi = self.config.reg_lambda * _ortho_loss(phi_embed[:B])
         Ortho_psi = self.config.reg_lambda * _ortho_loss(psi_embed[:B])
-        optim = [
-            self.opt_phi,
-            self.opt_psi,
-            self.opt_T_phi,
-            self.opt_T_psi,
-        ]
-        for opt in optim:
-            opt.zero_grad(set_to_none=True)
+
+        self.opt_critic.zero_grad(set_to_none=True)
         L = TD_phi + Ortho_phi + TD_psi + Ortho_psi
+
         L.backward()
-        for opt in optim:
-            opt.step()
+        torch.nn.utils.clip_grad_norm_(
+            [p for g in self.opt_critic.param_groups for p in g["params"]],
+            max_norm=1.0,
+        )
+        self.opt_critic.step()
         self.ema()
 
         # compute actor loss
+        self.T_phi.requires_grad_(False)
         phi_embed = phi_embed.detach()
-
         actor_input = (
             _tile(states, D) if self.config.actor_use_raw_obs else phi_embed.detach()
         )
         actor_actions = self.actor.sample_action(actor_input, z)
+
+        # in train_step, replace the actor loss section
+        data_actions = _tile(actions, D)
+        actor_actions = self.actor.sample_action(actor_input, z)
         self.T_phi.requires_grad_(False)
         F_actor = self.T_phi(phi_embed.detach(), actor_actions, z)
-        L_actor = -torch.mean(torch.einsum("Bi,Bi->B", F_actor, z))
+        q = torch.einsum("Bi,Bi->B", F_actor, z)
+        q_term = -q.mean()
+        bc_term = ((actor_actions - data_actions) ** 2).mean()
+        # TD3+BC scaling: BC weight scales with Q magnitude so it doesn't get drowned
+        lam = self.config.actor_bc_coeff / q.detach().abs().mean().clamp_min(1e-6)
+
+        L_actor = lam * q_term + bc_term
+
+        # F_actor = self.T_phi(phi_embed.detach(), actor_actions, z)
+        # L_actor = -torch.mean(torch.einsum("Bi,Bi->B", F_actor, z))
         self.opt_actor.zero_grad(set_to_none=True)
         L_actor.backward()
         self.opt_actor.step()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
         self.T_phi.requires_grad_(True)
 
         if log:
@@ -289,10 +310,11 @@ class TD_JEPA:
 
     @torch.no_grad()
     def fit_reward(self, states, rewards):
-        psi = self.psi(states.to(self.device)).to(rewards.device)
-        return torch.mean(
-            (psi * rewards) / torch.einsum("Bi, Bi -> B", psi, psi), dim=0
-        )
+        states = states.to(self.device)
+        rewards = rewards.to(self.device).view(-1, 1)
+        psi = self.psi(states)
+        z = torch.linalg.lstsq(psi, rewards).solution.squeeze(-1)  # (psi_dim,)
+        return (self.config.psi_dim**0.5) * z / z.norm().clamp_min(1e-8)
 
     @torch.no_grad()
     def act(self, states, z):
