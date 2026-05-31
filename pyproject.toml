@@ -43,3 +43,7 @@ reportUnannotatedClassAttribute = "none"
 reportAny = "none"
 reportUnusedCallResult = "none"
 reportUntypedFunctionDecorator = "none"
+
+[tool.basedpyright.analysis]
+maxLineLength = 120
+maxDocstringLineLength = 120

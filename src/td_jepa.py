@@ -1,6 +1,9 @@
 import copy
+import math
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from networks import Actor, FB_Predictor, StateEncoder
 
@@ -26,13 +29,15 @@ class TD_JEPA_CONFIG:
         T_phi_lr=1e-4,
         T_psi_lr=1e-4,
         actor_lr=1e-4,
+        adam_eps=1e-5,
         ema_coiff=0.99,
         # other hypers
         gamma=0.99,
         reg_lambda=0.1,
-        actor_use_raw_obs=False,
+        actor_use_raw_obs=True,
         actor_bc_coeff=0.3,
         latent_z_batch_size=1,  # (D)
+        train_goal_ratio=0.5,
         train_device="cuda",
         eval_device="cpu",
     ) -> None:
@@ -46,21 +51,63 @@ class TD_JEPA_CONFIG:
         self.T_phi_hidden_layers = T_phi_hidden_layers
         self.T_psi_hidden_layers = T_psi_hidden_layers
         self.actor_hidden_layers = actor_hidden_layers
+        self.actor_use_raw_obs = actor_use_raw_obs
 
         self.phi_lr = phi_lr
         self.psi_lr = psi_lr
         self.T_phi_lr = T_phi_lr
         self.T_psi_lr = T_psi_lr
         self.actor_lr = actor_lr
-        self.ema_coiff = ema_coiff
+        self.adam_eps = adam_eps
 
         self.gamma = gamma
-        self.reg_lambda = reg_lambda
-        self.actor_use_raw_obs = actor_use_raw_obs
-        self.actor_bc_coeff = actor_bc_coeff
+        self.ema_coiff = ema_coiff
         self.latent_z_batch_size = latent_z_batch_size
+        self.train_goal_ratio = train_goal_ratio
+        self.reg_lambda = reg_lambda
+        self.actor_bc_coeff = actor_bc_coeff
         self.train_device = train_device
         self.eval_device = eval_device
+
+    def make_networks(self):
+        phi = StateEncoder(
+            self.obs_dim, self.phi_dim, hidden_dims=self.phi_hidden_layers
+        )
+        psi = StateEncoder(
+            self.obs_dim, self.psi_dim, hidden_dims=self.psi_hidden_layers
+        )
+
+        T_phi = FB_Predictor(
+            self.phi_dim,
+            self.act_dim,
+            self.psi_dim,
+            self.psi_dim,
+            hidden_dims=self.psi_hidden_layers,
+        )
+
+        T_psi = FB_Predictor(
+            self.phi_dim,
+            self.act_dim,
+            self.psi_dim,
+            self.phi_dim,
+            hidden_dims=self.phi_hidden_layers,
+        )
+
+        if self.actor_use_raw_obs:
+            actor = Actor(
+                self.obs_dim,
+                self.psi_dim,
+                self.act_dim,
+                hidden_dims=self.actor_hidden_layers,
+            )
+        else:
+            actor = Actor(
+                self.phi_dim,
+                self.psi_dim,
+                self.act_dim,
+                hidden_dims=self.actor_hidden_layers,
+            )
+        return phi, psi, T_phi, T_psi, actor
 
 
 def _tile(x, D):
@@ -91,59 +138,13 @@ class TD_JEPA:
         self.eval_device = config.eval_device
         self.device = None
 
-        self.phi = (
-            StateEncoder(
-                config.obs_dim, config.phi_dim, hidden_dims=config.phi_hidden_layers
-            )
-            if not phi
-            else phi
-        )
-        self.psi = (
-            StateEncoder(
-                config.obs_dim, config.psi_dim, hidden_dims=config.psi_hidden_layers
-            )
-            if not psi
-            else psi
-        )
-        self.T_phi = (
-            FB_Predictor(
-                input_encoder_dim=config.phi_dim,
-                action_dim=config.act_dim,
-                z_dim=config.psi_dim,
-                output_encoder_dim=config.psi_dim,
-                hidden_dims=config.T_phi_hidden_layers,
-            )
-            if not T_phi
-            else T_phi
-        )
-        self.T_psi = (
-            FB_Predictor(
-                input_encoder_dim=config.psi_dim,
-                action_dim=config.act_dim,
-                z_dim=config.psi_dim,
-                output_encoder_dim=config.phi_dim,
-                hidden_dims=config.T_psi_hidden_layers,
-            )
-            if not T_psi
-            else T_psi
-        )  # (D_psi, D_a, D_z) -> (D_phi)
+        c_phi, c_psi, c_T_phi, c_T_psi, c_actor = config.make_networks()
 
-        if actor is not None:
-            self.actor = actor
-        elif config.actor_use_raw_obs:
-            self.actor = Actor(
-                config.obs_dim,
-                config.psi_dim,
-                config.act_dim,
-                hidden_dims=config.actor_hidden_layers,
-            )
-        else:
-            self.actor = Actor(
-                config.phi_dim,
-                config.psi_dim,
-                config.act_dim,
-                hidden_dims=config.actor_hidden_layers,
-            )
+        self.phi = c_phi if not phi else phi
+        self.psi = c_psi if not psi else psi
+        self.T_phi = c_T_phi if not T_phi else T_phi
+        self.T_psi = c_T_psi if not T_psi else T_psi
+        self.actor = c_actor if not actor else actor
 
         self.train_mode()
         # --- Target networks (EMA on encoders + predictors only; not actor)
@@ -167,9 +168,7 @@ class TD_JEPA:
             ]
         )
 
-    def train_mode(
-        self,
-    ):
+    def train_mode(self):
         self.phi.to(self.train_device)
         self.psi.to(self.train_device)
         self.T_phi.to(self.train_device)
@@ -177,26 +176,21 @@ class TD_JEPA:
         self.actor.to(self.train_device)
         self.device = self.train_device
 
+    def eval_mode(self):
+        self.phi.to(self.eval_device)
+        self.psi.to(self.eval_device)
+        self.T_phi.to(self.eval_device)
+        self.T_psi.to(self.eval_device)
+        self.actor.to(self.eval_device)
+        self.device = self.eval_device
+
     @torch.no_grad()
-    def _sample_latent_z(self, B):
-        z = torch.randn(B, self.config.psi_dim, device=self.device)
-        z = (self.config.phi_dim**0.5) * z / torch.norm(z, dim=-1, keepdim=True)
-        return z
-
-    def ema(self):
-        def _ema(source, target, tau):
-            with torch.no_grad():
-                torch._foreach_lerp_(
-                    list(target.parameters()),
-                    list(source.parameters()),
-                    tau,
-                )
-
-        tau = 1 - self.config.ema_coiff
-        _ema(self.phi, self.phi_t, tau)
-        _ema(self.psi, self.psi_t, tau)
-        _ema(self.T_phi, self.T_phi_t, tau)
-        _ema(self.T_psi, self.T_psi_t, tau)
+    def _project_z(self, z):
+        return (
+            math.sqrt(self.config.psi_dim)
+            * z
+            / z.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+        )
 
     @torch.no_grad()
     def compute_td_targets(self, next_states, terminals, z):
@@ -227,25 +221,23 @@ class TD_JEPA:
         terminals = terminals.contiguous()
         B = states.shape[0]
         D = self.config.latent_z_batch_size
-        z = self._sample_latent_z(B * D)
-        # compute EMA targets
+
         with torch.no_grad():
+            z = self._sample_mixed_z(next_states, D)
             phi_target, psi_target = self.compute_td_targets(next_states, terminals, z)
 
-        # compute losses
         phi_embed = _tile(self.phi(states), D)
         psi_embed = _tile(self.psi(states), D)
 
         F_phi = self.T_phi(phi_embed, _tile(actions, D), z)
         F_psi = self.T_psi(psi_embed, _tile(actions, D), z)
-        TD_phi = 0.5 * torch.mean(torch.square(phi_target - F_phi))
-        TD_psi = 0.5 * torch.mean(torch.square(psi_target - F_psi))
+        TD_phi = torch.square(phi_target - F_phi).sum(-1).mean()
+        TD_psi = torch.square(psi_target - F_psi).sum(-1).mean()
         Ortho_phi = self.config.reg_lambda * _ortho_loss(phi_embed[:B])
         Ortho_psi = self.config.reg_lambda * _ortho_loss(psi_embed[:B])
 
         self.opt_critic.zero_grad(set_to_none=True)
         L = TD_phi + Ortho_phi + TD_psi + Ortho_psi
-
         L.backward()
         torch.nn.utils.clip_grad_norm_(
             [p for g in self.opt_critic.param_groups for p in g["params"]],
@@ -298,16 +290,6 @@ class TD_JEPA:
                 .item(),
             }
 
-    def eval_mode(
-        self,
-    ):
-        self.phi.to(self.eval_device)
-        self.psi.to(self.eval_device)
-        self.T_phi.to(self.eval_device)
-        self.T_psi.to(self.eval_device)
-        self.actor.to(self.eval_device)
-        self.device = self.eval_device
-
     @torch.no_grad()
     def fit_reward(self, states, rewards):
         states = states.to(self.device)
@@ -323,3 +305,35 @@ class TD_JEPA:
         if not self.config.actor_use_raw_obs:
             states = self.phi(states)
         return self.actor(states, z)
+
+    @torch.no_grad()
+    def _sample_mixed_z(self, next_states, D):
+        """
+        Sample latent z mixed pwith psi(next_states)
+        """
+        B = next_states.shape[0]
+        BD = B * D
+        z = self._project_z(torch.randn(B, self.config.psi_dim, device=self.device))
+        if self.config.train_goal_ratio <= 0.0:
+            return z
+        next_tiled = _tile(next_states, D)
+        perm = torch.randperm(BD, device=self.device)
+        goals = self.psi(next_tiled[perm])
+        goals = self._project_z(goals)
+        mask = torch.rand((BD, 1), device=self.device) < self.config.train_goal_ratio
+        return torch.where(mask, goals, z)
+
+    def ema(self):
+        def _ema(source, target, tau):
+            with torch.no_grad():
+                torch._foreach_lerp_(
+                    list(target.parameters()),
+                    list(source.parameters()),
+                    tau,
+                )
+
+        tau = 1 - self.config.ema_coiff
+        _ema(self.phi, self.phi_t, tau)
+        _ema(self.psi, self.psi_t, tau)
+        _ema(self.T_phi, self.T_phi_t, tau)
+        _ema(self.T_psi, self.T_psi_t, tau)
