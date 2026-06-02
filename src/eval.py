@@ -8,8 +8,8 @@ Assumes `agent` exposes:
     agent.psi(s)              # (B, obs) -> (B, psi_dim), already normalized
     agent.fit_reward(s, r)    # (N, obs), (N,) or (N,1) -> (psi_dim,), projected
     agent.act(s, z)           # (B, obs), (B, psi_dim) -> (B, act_dim), in [-1, 1]
-    agent.q_phi(s, a, z)      # (B, obs), (B, act), (B, psi_dim) -> (B, psi_dim)
-    agent.q_psi(s, a, z)      # (B, obs), (B, act), (B, psi_dim) -> (B, phi_dim)
+    agent.T_phi.predict(s, a, z)      # (B, phi_dim), (B, act), (B, psi_dim) -> (B, psi_dim)
+    agent.T_psi.predict(s, a, z)      # (B, psi_dim), (B, act), (B, psi_dim) -> (B, phi_dim)
     agent.device              # str
     agent.config.psi_dim      # int
     agent.config.act_dim      # int
@@ -25,6 +25,7 @@ from typing import Dict, Tuple
 import matplotlib
 import numpy as np
 import torch
+import torch.nn.functional as F
 import tqdm
 
 matplotlib.use("Agg")
@@ -46,7 +47,7 @@ def detect_morph(env_name: str) -> str:
 
 
 def _dot_z(pred_vec: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-    """Q scalar from predictor vector. If q_phi already returns a scalar,
+    """Q scalar from predictor vector. If T_phi already returns a scalar,
     replace with `return pred_vec.squeeze(-1)`."""
     return (pred_vec * z).sum(-1)
 
@@ -77,42 +78,74 @@ def infer_z_for_task(
     agent,
     pool: torch.Tensor,
     goal_xy: np.ndarray,
-    tol: float,
-    shift_reward: float = 1.0,
+    tol: float,  # SUCCESS tol (per-env): only used if reward_tol is None
+    shift_reward: float = 0.0,  # reference default is 0.0, NOT 1.0
+    oracle_z: bool = False,  # if True, bypass lstsq: z = project(psi(goal))
     verbose: bool = False,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
-    """Match facebookresearch/td_jepa OGBench eval.
+    """Faithful to facebookresearch/td_jepa OGBench eval (ant_reward_fn):
 
-    relabel  = (||s'_xy - goal||_2 <= tol).float() - 1.0     # ant_reward_fn
-    rewards  = relabel + shift_reward                        # shift=1.0 in launch
-    z        = lstsq(psi(next_obs), rewards).solution.T
-    z        = sqrt(d) * F.normalize(z, dim=-1)              # in fit_reward
+        reward = (||s'_xy - goal||_2 <= 0.5).float() - 1.0    # values in {-1, 0}
+        reward = reward + shift_reward                        # shift defaults to 0.0
+        z      = lstsq(psi(next_obs), reward).solution.T
+        z      = sqrt(d) * F.normalize(z)                     # project_z, in fit_reward
+
+    NOTE: the reference reward is the SPARSE indicator minus 1 (mostly -1, a few 0s);
+    it is NOT dense. The {-1,0} convention differs from a {0,1} convention by a
+    constant offset, which lstsq absorbs into the psi-mean direction -- so the
+    convention is not cosmetic. We match the reference exactly.
     """
     goal_t = torch.as_tensor(goal_xy, dtype=torch.float32, device=agent.device)
+
+    if oracle_z:
+        # Goal-reaching z*: up to the cov correction, z* ∝ psi(goal).
+        # Pointmaze obs == xy, so psi takes the 2-d goal directly; for higher-dim
+        # obs this still works if psi was trained to embed states whose xy == goal.
+        g = goal_t.view(1, -1)
+        if g.shape[-1] < agent.phi(pool[:1].to(agent.device)).shape[-1]:
+            pass  # caller is responsible for passing a full-obs goal if obs != xy
+        z = agent._project_z(agent.psi(g)).squeeze(0)
+        diag = {"oracle_z": True, "positives": -1, "reward_fit_cos": float("nan")}
+        if verbose:
+            print(
+                f"        [z-inf] goal=({goal_xy[0]:+.2f},{goal_xy[1]:+.2f})  ORACLE z=psi(goal)"
+            )
+        return z, diag
+
     xy = pool[:, :2].to(agent.device)
     dist = (xy - goal_t).norm(dim=-1)
 
+    # Reference convention: indicator - 1.0  ->  {-1, 0}
     relabel = (dist <= tol).float() - 1.0
     rew = relabel + shift_reward
 
     n_pos = int((dist <= tol).sum().item())
+    z = agent.fit_reward(pool, rew)
+
+    # Reward-fit quality, computed on the SAME (shifted) target we fit.
+    psi_pool = agent.psi(pool.to(agent.device))
+    r_hat = psi_pool @ z
+    rew_t = rew.to(agent.device).view(1, -1)
+    cos = F.cosine_similarity(r_hat.view(1, -1), rew_t).item()
+
     diag = {
         "positives": n_pos,
-        "tol": tol,
+        "reward_tol": tol,
         "shift_reward": shift_reward,
         "min_dist": float(dist.min().item()),
         "rew_mean": float(rew.mean().item()),
+        "reward_fit_cos": cos,
     }
     if verbose:
         print(
             f"        [z-inf] goal=({goal_xy[0]:+.2f},{goal_xy[1]:+.2f})  "
-            f"positives={n_pos}/{rew.numel()} (tol={tol:.2f})  "
-            f"shift={shift_reward:+.1f}  "
-            f"rew_mean={diag['rew_mean']:+.3f}  "
+            f"positives={n_pos}/{rew.numel()} (rtol={tol:.2f})  "
+            f"shift={shift_reward:+.1f}  rew_mean={diag['rew_mean']:+.3f}  "
             f"min_dist={diag['min_dist']:.3f}"
         )
+        flag = "z-inference BOTTLENECK" if cos < 0.5 else "ok"
+        print(f"        [z-inf]   reward_fit_cos={cos:+.3f}  ({flag})")
 
-    z = agent.fit_reward(pool, rew)
     return z, diag
 
 
@@ -173,16 +206,18 @@ def signal_to_noise(
 ):
     """In-distribution vs shuffled-target bilinear ratio.
 
-    Healthy: |q_phi(s, a, z) . psi(s')|_real >> |.|_shuffled.
+    Healthy: |<F(s,a,z), psi(s')>|_real >> |.|_shuffled. A low ratio means the
+    control-relevant variation in F is buried under a state-independent (DC)
+    component, i.e. the signal/noise problem cumulant-centering targets.
     """
     idx = torch.randperm(pool_obs.shape[0], device=pool_obs.device)[:n]
     s = pool_obs[idx].to(agent.device)
     a = pool_act[idx].to(agent.device)
     sp = pool_next[idx].to(agent.device)
-    shuf = sp[torch.randperm(n, device=agent.device)]
-    z = _sample_z_uniform(agent, n)
+    shuf = sp[torch.randperm(s.shape[0], device=agent.device)]
+    z = _sample_z_uniform(agent, s.shape[0])
 
-    f = agent.q_phi(s, a, z)
+    f = agent.T_phi.predict(agent.phi(s), a, z)
     psi_sp = agent.psi(sp)
     psi_sh = agent.psi(shuf)
 
@@ -221,7 +256,7 @@ def print_predictor_z_sensitivity(
     n_states: int = 64,
     n_random_zs: int = 4,
 ):
-    """Q = q_phi(s, π(s,z), z) . z across different z's on a fixed batch."""
+    """Q = T_phi(s, π(s,z), z) . z across different z's on a fixed batch."""
     idx = torch.randperm(pool.shape[0], device=pool.device)[:n_states]
     s = pool[idx].to(agent.device)
 
@@ -233,7 +268,7 @@ def print_predictor_z_sensitivity(
     for z in zs:
         z_b = z.unsqueeze(0).expand(n_states, -1)
         a = agent.act(s, z_b)
-        pred = agent.q_phi(s, a, z_b)
+        pred = agent.T_phi.predict(agent.phi(s), a, z_b)
         qs.append(_dot_z(pred, z_b).mean().item())
 
     qs_np = np.asarray(qs)
@@ -266,6 +301,11 @@ def q_calibration(
 ):
     """Roll out under π(·, z), compare Q_pred(s_t, z) vs Q_actual(s_t, z).
 
+    The cumulant is psi(s'), so T_phi predicts the discounted sum of future
+    cumulants starting at s_{t+1}:  Q_pred(s_t) ~= sum_{k>=1} g^{k-1} r(s_{t+k}).
+    The return-to-go includes r(s_t), so bias/corr are computed on the aligned
+    pair (q_preds[:-1] vs return_to_go[1:]). s0 prints remain the raw values.
+
     Q_actual uses both the indicator reward (env-true) and <psi(s), z>
     (the reward z was actually fit to). Big indicator/z-reward gap means
     z-inference is the bottleneck. Big pred/actual gap means the critic is.
@@ -279,7 +319,7 @@ def q_calibration(
             0
         )
         a = agent.act(o_t, z_b)
-        pred = agent.q_phi(o_t, a, z_b)
+        pred = agent.T_phi.predict(agent.phi(o_t), a, z_b)
         q_preds.append(_dot_z(pred, z_b).item())
         r_inds.append(float(np.linalg.norm(obs[:2] - goal_xy) <= tol))
         r_zs.append((agent.psi(o_t) * z_b).sum(-1).item())
@@ -303,6 +343,14 @@ def q_calibration(
     q_act_ind = _disc_return_to_go(r_inds)
     q_act_zr = _disc_return_to_go(r_zs)
 
+    # Align: Q_pred(s_t) predicts the return from s_{t+1} onward.
+    if len(q_preds) > 1:
+        q_p_al = q_preds[:-1]
+        ind_al = q_act_ind[1:]
+        zr_al = q_act_zr[1:]
+    else:
+        q_p_al, ind_al, zr_al = q_preds, q_act_ind, q_act_zr
+
     def _corr(a, b):
         if a.std() > 1e-6 and b.std() > 1e-6:
             return float(np.corrcoef(a, b)[0, 1])
@@ -315,22 +363,25 @@ def q_calibration(
         "q_pred_s0": float(q_preds[0]),
         "q_actual_indicator_s0": float(q_act_ind[0]),
         "q_actual_zreward_s0": float(q_act_zr[0]),
-        "bias_vs_indicator": float(q_preds.mean() - q_act_ind.mean()),
-        "bias_vs_zreward": float(q_preds.mean() - q_act_zr.mean()),
-        "corr_vs_indicator": _corr(q_preds, q_act_ind),
-        "corr_vs_zreward": _corr(q_preds, q_act_zr),
+        "bias_vs_indicator": float(q_p_al.mean() - ind_al.mean()),
+        "bias_vs_zreward": float(q_p_al.mean() - zr_al.mean()),
+        "corr_vs_indicator": _corr(q_p_al, ind_al),
+        "corr_vs_zreward": _corr(q_p_al, zr_al),
         "indicator_return": float(q_act_ind[0]) if len(q_act_ind) else 0.0,
         "success": int(max(r_inds) > 0.5) if r_inds else 0,
         "steps": len(q_preds),
     }
     if verbose:
+        # corr_ind is nan until success > 0 (indicator return has no variance).
+        ci = out["corr_vs_indicator"]
+        ci_s = "  n/a" if math.isnan(ci) else f"{ci:+.2f}"
         print(
             f"        [q-cal t{task_id}] "
             f"Q_pred[s0]={out['q_pred_s0']:+.2f}  "
             f"Q_act_ind[s0]={out['q_actual_indicator_s0']:+.2f}  "
             f"Q_act_z[s0]={out['q_actual_zreward_s0']:+.2f}  "
             f"bias_ind={out['bias_vs_indicator']:+.2f}  "
-            f"corr_ind={out['corr_vs_indicator']:+.2f}  "
+            f"corr_ind={ci_s}  "
             f"corr_z={out['corr_vs_zreward']:+.2f}  "
             f"ret={out['indicator_return']:+.2f}  "
             f"succ={out['success']}  "
@@ -516,8 +567,9 @@ def evaluate_zero_shot(
     num_tasks: int = 5,
     num_episodes: int = 10,
     max_steps: int = 1000,
-    num_inference_samples: int = 10_000,
+    num_inference_samples: int = 50_000,
     shift_reward: float = 1.0,
+    oracle_z: bool = False,
     verbose: bool = True,
     step: int = 0,
     save_dir: str = "trajectories",
@@ -554,7 +606,13 @@ def evaluate_zero_shot(
     for task_id in range(1, num_tasks + 1):
         _, goal_xy = _goal_xy_from_reset(env, task_id)
         z, _ = infer_z_for_task(
-            agent, pool, goal_xy, tol, shift_reward=shift_reward, verbose=verbose
+            agent,
+            pool,
+            goal_xy,
+            tol,
+            shift_reward=shift_reward,
+            verbose=verbose,
+            oracle_z=oracle_z,
         )
         z_per_task[task_id] = z
         goal_per_task[task_id] = goal_xy
