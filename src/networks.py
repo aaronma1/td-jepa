@@ -9,12 +9,25 @@ from typing_extensions import override
 
 
 class EncoderConfig:
-    def __init__(self, n_hidden: int, width: int, normalize_out: bool = True):
+    def __init__(
+        self, n_hidden: int, width: int, normalize_out: bool = True, siren_encoder=False
+    ):
         self.n_hidden = n_hidden
         self.width = width
         self.normalize_out = normalize_out
+        self.siren_encoder = siren_encoder
 
     def build_network(self, s_dim, out_dim):
+
+        if self.siren_encoder:
+            return SIRENEncoder(
+                s_dim,
+                out_dim,
+                self.width,
+                self.n_hidden,
+                normalize_representation=self.normalize_out,
+            )
+
         return StateEncoder(
             s_dim,
             out_dim,
@@ -58,13 +71,14 @@ def _build_mlp(
     input_dim: int,
     output_dim: int,
     hidden_dims,
+    input_activation=nn.Tanh,
     activation=nn.ReLU,
 ):
     layers = []
     layers += [
         nn.Linear(input_dim, hidden_dims[0]),
         nn.LayerNorm(hidden_dims[0]),
-        nn.Tanh(),
+        input_activation(),
     ]
 
     last_dim = hidden_dims[0]
@@ -90,12 +104,82 @@ def _build_embedding(
     hidden_activation=nn.ReLU,
 ):
 
-    seq = [nn.Linear(input_dim, width), nn.LayerNorm(width), input_activation()]
+    seq = [
+        nn.Linear(input_dim, width),
+        nn.LayerNorm(width),
+        input_activation(),
+    ]
     for i in range(1, depth):
         seq += [nn.Linear(width, width), hidden_activation()]
     seq += [nn.Linear(width, output_dim)]
 
     return nn.Sequential(*seq)
+
+
+class SIRENEncoder(nn.Module):
+    class SineLayer(nn.Module):
+        """SIREN layer: sin(omega_0 * (Wx+b)) with Sitzmann et al. (2020) init."""
+
+        def __init__(self, in_features, out_features, is_first=False, omega_0=16.0):
+            super().__init__()
+            self.in_features = in_features
+            self.omega_0 = omega_0
+            self.linear = nn.Linear(in_features, out_features)
+            with torch.no_grad():
+                bound = (
+                    (1.0 / in_features)
+                    if is_first
+                    else (math.sqrt(6.0 / in_features) / omega_0)
+                )
+                self.linear.weight.uniform_(-bound, bound)
+                self.linear.bias.zero_()
+
+        def forward(self, x):
+            return torch.sin(self.omega_0 * self.linear(x))
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        width: int,
+        depth: int,
+        activation=nn.ReLU,
+        normalize_representation=True,
+    ):
+        super().__init__()
+
+        self.embed = nn.Sequential(
+            SIRENEncoder.SineLayer(input_dim, width, is_first=True),
+            SIRENEncoder.SineLayer(width, width),
+        )
+
+        self.net = nn.Sequential(
+            nn.Linear(width, width),
+            nn.ReLU(),
+            nn.Linear(width, width),
+            nn.ReLU(),
+            nn.Linear(width, output_dim),
+        )
+
+        def init_orthogonal(module):
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        self.net.apply(init_orthogonal)
+
+        self.output_dim = output_dim
+        self.normalize_represenation = normalize_representation
+
+    @override
+    def forward(self, obs):
+        obs = 2 * (((obs + 2) / 25) - 0.5)
+        z = self.net(self.embed(obs))
+
+        if self.normalize_represenation:
+            z = math.sqrt(self.output_dim) * F.normalize(z, dim=-1)
+        return z
 
 
 class StateEncoder(nn.Module):
@@ -109,7 +193,12 @@ class StateEncoder(nn.Module):
         normalize_representation=True,
     ):
         super().__init__()
-        self.net = _build_embedding(input_dim, output_dim, width, depth)
+        self.net = _build_embedding(
+            input_dim,
+            output_dim,
+            width,
+            depth,
+        )
         self.output_dim = output_dim
         self.normalize_represenation = normalize_representation
         self.apply(self._init_weights)

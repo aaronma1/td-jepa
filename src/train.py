@@ -18,18 +18,22 @@ def default_config(env_name):
         return TD_JEPA_CONFIG(
             obs_dim=2,
             act_dim=2,
-            phi_dim=32,
-            psi_dim=32,
-            phi_config=EncoderConfig(n_hidden=4, width=128),
-            psi_config=EncoderConfig(n_hidden=4, width=128),
-            T_phi_config=FbConfig(width=512, n_sa=2, n_sz=2, n_shared=2),
-            T_psi_config=FbConfig(width=512, n_sa=2, n_sz=2, n_shared=2),
-            actor_config=ActorConfig(width=128, depth=4),
-            actor_bc_coeff=0,
-            actor_use_raw_obs=True,
-            lambda_phi=1,
-            lambda_psi=1,
-            #
+            phi_dim=128,
+            psi_dim=128,
+            phi_config=EncoderConfig(n_hidden=4, width=256, siren_encoder=True),
+            psi_config=EncoderConfig(n_hidden=4, width=256, siren_encoder=True),
+            T_phi_config=FbConfig(width=512, n_sa=3, n_sz=3, n_shared=3),
+            T_psi_config=FbConfig(width=512, n_sa=3, n_sz=3, n_shared=3),
+            actor_config=ActorConfig(width=256, depth=4),
+            actor_bc_coeff=0.3,
+            actor_use_raw_obs=False,
+            lambda_phi=1.0,
+            lambda_psi=1.0,
+            tau_encoder=0.001,
+            phi_lr=1e-5,
+            psi_lr=1e-5,
+            train_goal_ratio=0.125,
+            latent_z_batch_size=4,
         )
     if env_name.startswith("antmaze"):
         return TD_JEPA_CONFIG(
@@ -45,8 +49,8 @@ def default_config(env_name):
             # train_device="cpu",
             actor_bc_coeff=0.3,
             actor_use_raw_obs=True,
-            lambda_phi=1,
-            lambda_psi=1,
+            lambda_phi=2.0,
+            lambda_psi=2.0,
             #
         )
     raise ValueError(f"no default config for env {env_name!r}")
@@ -95,6 +99,9 @@ def train_env(args, config=None):
     morph = detect_morph(args.env_name)
     agent = TD_JEPA(config)  # pyright: ignore[reportArgumentType]
     t0 = time.time()
+
+    print(torch.max(buffer.s[:, 0]), torch.min(buffer.s[:, 0]))
+    print(torch.max(buffer.s[:, 1]), torch.min(buffer.s[:, 1]))
 
     log_buf = None
     n_info = 0
