@@ -4,7 +4,6 @@ from typing import Iterable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from sympy.ntheory.residue_ntheory import n_order
 from typing_extensions import override
 
 
@@ -322,8 +321,91 @@ class Actor(nn.Module):
         input = torch.cat([obs, z], dim=-1)
         return torch.tanh(self.net(input))
 
-    def sample_action(self, obs, z, stddev=0.01, stddev_clip=0.03):
+    def sample_action(self, obs, z, stddev=0.1, stddev_clip=0.3):
         act = self.forward(obs, z)
         noise = torch.randn_like(act) * stddev
         noise = noise.clamp(-stddev_clip, stddev_clip)
         return (act + noise).clamp(-1.0, 1.0)
+
+
+class WmConfig:
+    def __init__(self, width: int, n_sa: int, n_shared: int):
+        self.width = width
+        self.n_sa = n_sa
+        self.n_shared = n_shared
+
+    def build_network(self, s_dim, a_dim, out_dim):
+        return WmPredictor(
+            s_dim,
+            a_dim,
+            out_dim,
+            hidden_width=self.width,
+            n_sa=self.n_sa,
+            n_shared=self.n_shared,
+        )
+
+
+class WmPredictor(nn.Module):
+    def __init__(
+        self,
+        input_encoder_dim: int,
+        action_dim: int,
+        output_encoder_dim: int,
+        hidden_width: int = 512,
+        n_sa: int = 2,
+        n_shared: int = 2,
+        n_parallel: int = 2,
+    ):
+        super().__init__()
+        self.embed_sa = _build_embedding(
+            input_encoder_dim + action_dim,
+            hidden_width,
+            hidden_width,
+            n_sa,
+        )
+        self.embed_sa2 = _build_embedding(
+            input_encoder_dim + action_dim,
+            hidden_width,
+            hidden_width,
+            n_sa,
+        )
+
+        self.body = nn.Sequential(
+            nn.Linear(hidden_width, hidden_width),
+            nn.ReLU(),
+            nn.Linear(hidden_width, hidden_width),
+            nn.ReLU(),
+            nn.Linear(hidden_width, output_encoder_dim),
+        )
+        self.body2 = nn.Sequential(
+            nn.Linear(hidden_width, hidden_width),
+            nn.ReLU(),
+            nn.Linear(hidden_width, hidden_width),
+            nn.ReLU(),
+            nn.Linear(hidden_width, output_encoder_dim),
+        )
+
+        self.output_dim = output_encoder_dim
+        self.apply(self._init_weights)
+
+    @override
+    def forward(self, obs, action):
+        sa = torch.cat([obs, action], dim=-1)
+        return torch.stack(
+            [self.body(self.embed_sa(sa)), self.body2(self.embed_sa2(sa))]
+        )
+
+    def predict(self, obs, action):
+        p = self.forward(obs, action)
+        return (p[0] + p[1]) / 2
+
+    @staticmethod
+    def _init_weights(m):
+        if isinstance(m, nn.Linear):
+            nn.init.orthogonal_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)

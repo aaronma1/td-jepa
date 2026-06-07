@@ -339,3 +339,9 @@ class TD_JEPA:
         _ema(self.psi_t, self.psi, self.config.tau_encoder)
         _ema(self.T_phi_t, self.T_phi, self.config.tau_predictor)
         _ema(self.T_psi_t, self.T_psi, self.config.tau_predictor)
+
+    def save_state(self, save_path):
+        pass
+
+    def load_state(self, save_path):
+        pass

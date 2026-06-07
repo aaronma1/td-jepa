@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 from typing import Dict, Tuple
 
 import matplotlib
@@ -293,8 +294,6 @@ def q_calibration(
     agent,
     env,
     z: torch.Tensor,
-    goal_xy: np.ndarray,
-    tol: float,
     task_id: int,
     max_steps: int = 1000,
     verbose: bool = True,
@@ -311,7 +310,7 @@ def q_calibration(
     z-inference is the bottleneck. Big pred/actual gap means the critic is.
     """
     obs, _ = env.reset(options=dict(task_id=task_id, render_goal=False))
-    q_preds, r_inds, r_zs = [], [], []
+    q_preds, r_zs = [], []
     z_b = z.unsqueeze(0).to(agent.device)
 
     for _ in range(max_steps):
@@ -321,14 +320,9 @@ def q_calibration(
         a = agent.act(o_t, z_b)
         pred = agent.T_phi.predict(agent.phi(o_t), a, z_b)
         q_preds.append(_dot_z(pred, z_b).item())
-        r_inds.append(float(np.linalg.norm(obs[:2] - goal_xy) <= tol))
         r_zs.append((agent.psi(o_t) * z_b).sum(-1).item())
 
-        obs, _, term, trunc, info = env.step(a.cpu().numpy().squeeze(0))
-        if float(info.get("success", 0.0)) > 0.5 or term or trunc:
-            r_inds[-1] = max(r_inds[-1], float(info.get("success", 0.0)))
-            break
-
+        obs, _, _, _, _ = env.step(a.cpu().numpy().squeeze(0))
     gamma = getattr(agent.config, "gamma", 0.99)
 
     def _disc_return_to_go(rewards):
@@ -340,16 +334,13 @@ def q_calibration(
         return out
 
     q_preds = np.asarray(q_preds)
-    q_act_ind = _disc_return_to_go(r_inds)
     q_act_zr = _disc_return_to_go(r_zs)
-
     # Align: Q_pred(s_t) predicts the return from s_{t+1} onward.
     if len(q_preds) > 1:
         q_p_al = q_preds[:-1]
-        ind_al = q_act_ind[1:]
         zr_al = q_act_zr[1:]
     else:
-        q_p_al, ind_al, zr_al = q_preds, q_act_ind, q_act_zr
+        q_p_al, zr_al = q_preds, q_act_zr
 
     def _corr(a, b):
         if a.std() > 1e-6 and b.std() > 1e-6:
@@ -358,33 +349,21 @@ def q_calibration(
 
     out = {
         "q_pred_mean": float(q_preds.mean()),
-        "q_actual_indicator_mean": float(q_act_ind.mean()),
         "q_actual_zreward_mean": float(q_act_zr.mean()),
         "q_pred_s0": float(q_preds[0]),
-        "q_actual_indicator_s0": float(q_act_ind[0]),
         "q_actual_zreward_s0": float(q_act_zr[0]),
-        "bias_vs_indicator": float(q_p_al.mean() - ind_al.mean()),
         "bias_vs_zreward": float(q_p_al.mean() - zr_al.mean()),
-        "corr_vs_indicator": _corr(q_p_al, ind_al),
         "corr_vs_zreward": _corr(q_p_al, zr_al),
-        "indicator_return": float(q_act_ind[0]) if len(q_act_ind) else 0.0,
-        "success": int(max(r_inds) > 0.5) if r_inds else 0,
         "steps": len(q_preds),
     }
     if verbose:
         # corr_ind is nan until success > 0 (indicator return has no variance).
-        ci = out["corr_vs_indicator"]
-        ci_s = "  n/a" if math.isnan(ci) else f"{ci:+.2f}"
         print(
             f"        [q-cal t{task_id}] "
             f"Q_pred[s0]={out['q_pred_s0']:+.2f}  "
-            f"Q_act_ind[s0]={out['q_actual_indicator_s0']:+.2f}  "
             f"Q_act_z[s0]={out['q_actual_zreward_s0']:+.2f}  "
-            f"bias_ind={out['bias_vs_indicator']:+.2f}  "
-            f"corr_ind={ci_s}  "
             f"corr_z={out['corr_vs_zreward']:+.2f}  "
-            f"ret={out['indicator_return']:+.2f}  "
-            f"succ={out['success']}  "
+            f"bias_z={out['bias_vs_zreward']:+.2f}  "
             f"T={out['steps']}"
         )
     return out
@@ -464,18 +443,42 @@ def plot_trajectories(
     step: int,
     save_dir: str = "trajectories",
     max_steps: int = 1000,
+    pool: torch.Tensor = None,
+    n_bg: int = 4000,
+    field: str = "both",  # "reward" | "value" | "both" | "none"
+    value_action_mode: str = "policy",
+    value_n_actions: int = 16,
 ):
     os.makedirs(save_dir, exist_ok=True)
     task_ids = sorted(z_per_task.keys())
     n = len(task_ids)
-    fig, axes = plt.subplots(1, n, figsize=(4 * n, 4), squeeze=False)
-    axes = axes[0]
+
+    rows = []
+    if pool is not None and field != "none":
+        if field in ("reward", "both"):
+            rows.append("reward")
+        if field in ("value", "both"):
+            rows.append("value")
+    if not rows:
+        rows = ["traj"]  # plain trajectories, no background field
+    nrow = len(rows)
+
+    bg_xy = bg = None
+    if pool is not None and rows != ["traj"]:
+        bg = pool
+        if bg.shape[0] > n_bg:
+            bg = bg[torch.randperm(bg.shape[0], device=bg.device)[:n_bg]]
+        bg_xy = bg[:, :2].cpu().numpy()
+        bg_psi = agent.psi(bg.to(agent.device)) if "reward" in rows else None
+
+    fig, axes = plt.subplots(nrow, n, figsize=(4 * n, 4 * nrow), squeeze=False)
 
     summary = {}
-    for ax, task_id in zip(axes, task_ids):
+    # roll out once per task; reuse the trajectory across all rows
+    for col, task_id in enumerate(task_ids):
         obs, goal_xy = _goal_xy_from_reset(env, task_id)
-        z = z_per_task[task_id].unsqueeze(0)
-        _draw_maze_walls(ax, env)
+        z_vec = z_per_task[task_id]
+        z = z_vec.unsqueeze(0)
 
         traj = [obs[:2].copy()]
         actions = []
@@ -500,25 +503,59 @@ def plot_trajectories(
         amag = float(np.linalg.norm(actions, axis=-1).mean()) if actions.size else 0.0
         final_dist = float(np.linalg.norm(traj[-1] - goal_xy))
 
-        ax.plot(traj[:, 0], traj[:, 1], lw=0.8, alpha=0.9, zorder=2)
-        ax.scatter(
-            traj[0, 0], traj[0, 1], c="g", s=60, marker="o", label="start", zorder=3
-        )
-        ax.scatter(
-            goal_xy[0], goal_xy[1], c="r", s=120, marker="*", label="goal", zorder=3
-        )
-        ax.scatter(
-            traj[-1, 0], traj[-1, 1], c="b", s=40, marker="x", label="end", zorder=3
-        )
-        ax.set_title(
-            f"t{task_id} {'✓' if success else '✗'} "
-            f"d={final_dist:.2f} |a|={amag:.2f} sat={sat:.2f} T={len(actions)}",
-            fontsize=9,
-        )
-        ax.set_aspect("equal", adjustable="box")
-        ax.grid(True, alpha=0.15, zorder=1)
-        if task_id == task_ids[0]:
-            ax.legend(fontsize=7, loc="best")
+        for r, kind in enumerate(rows):
+            ax = axes[r, col]
+            _draw_maze_walls(ax, env)
+
+            pct = None
+            if kind == "reward":
+                pct = _draw_field(
+                    ax, fig, bg_xy, (bg_psi * z_vec).sum(-1).cpu().numpy(), goal_xy
+                )
+            elif kind == "value":
+                vals = _value_field(
+                    agent,
+                    bg,
+                    z_vec,
+                    n_actions=value_n_actions,
+                    action_mode=value_action_mode,
+                )
+                pct = _draw_field(ax, fig, bg_xy, vals, goal_xy)
+
+            ax.plot(traj[:, 0], traj[:, 1], lw=0.8, alpha=0.9, color="w", zorder=2)
+            ax.scatter(
+                traj[0, 0],
+                traj[0, 1],
+                c="lime",
+                s=60,
+                marker="o",
+                label="start",
+                zorder=3,
+            )
+            ax.scatter(
+                goal_xy[0], goal_xy[1], c="r", s=120, marker="*", label="goal", zorder=3
+            )
+            ax.scatter(
+                traj[-1, 0],
+                traj[-1, 1],
+                c="black",
+                s=40,
+                marker="x",
+                label="end",
+                zorder=3,
+            )
+
+            tag = {"reward": "r̂=⟨ψ,z⟩", "value": "E_a Q", "traj": ""}[kind]
+            gp = f" gP={pct:.2f}" if pct is not None else ""
+            ax.set_title(
+                f"t{task_id} {'✓' if success else '✗'} {tag}{gp}  "
+                f"d={final_dist:.2f} |a|={amag:.2f} sat={sat:.2f} T={len(actions)}",
+                fontsize=8,
+            )
+            ax.set_aspect("equal", adjustable="box")
+            ax.grid(True, alpha=0.15, zorder=1)
+            if col == 0 and r == 0:
+                ax.legend(fontsize=7, loc="best")
 
         summary[task_id] = {
             "success": success,
@@ -535,7 +572,6 @@ def plot_trajectories(
     plt.close(fig)
     print(f"        [traj] saved {path}")
 
-    # Action diversity at a shared state.
     obs0, _ = env.reset(options=dict(task_id=task_ids[0]))
     s = torch.as_tensor(obs0, dtype=torch.float32, device=agent.device).unsqueeze(0)
     acts = np.stack(
@@ -551,6 +587,186 @@ def plot_trajectories(
         f"mean_pairwise_dist={triu.mean():.3f} max={triu.max():.3f}"
     )
     return summary
+
+
+# ---------- principal-component color plots ----------
+
+
+@torch.no_grad()
+def _pca_scores(feats: torch.Tensor, k: int):
+    """Top-k PCA of feats via SVD of the centered matrix.
+
+    Returns (scores [B,k], var_frac [k], loadings [k,d]). scores[:,i] == Xc @ V_i,
+    so each column is mean-zero -> a zero-centered diverging colormap is correct.
+    A max-abs-loading-positive sign convention (sklearn's svd_flip) makes the sign
+    deterministic, so colors stay consistent across checkpoints / across phi vs psi.
+    """
+    feats = feats.float()
+    mean = feats.mean(0, keepdim=True)
+    Xc = feats - mean
+    U, S, Vh = torch.linalg.svd(Xc, full_matrices=False)
+    k = min(k, S.shape[0])
+    U, S, Vh = U[:, :k], S[:k], Vh[:k]
+    sign = torch.sign(Vh[torch.arange(k, device=Vh.device), Vh.abs().argmax(dim=1)])
+    sign[sign == 0] = 1.0
+    Vh = Vh * sign.unsqueeze(1)
+    U = U * sign.unsqueeze(0)
+    scores = U * S.unsqueeze(0)  # == Xc @ Vh.T
+    var_frac = S.pow(2) / S.pow(2).sum().clamp_min(1e-12)
+    return scores, var_frac, Vh
+
+
+@torch.no_grad()
+def plot_principal_components(
+    agent,
+    states: torch.Tensor,
+    step: int,
+    name: str = "psi",
+    n_components: int = 6,
+    save_dir: str = "trajectories",
+    env=None,
+    max_points: int = 20_000,
+    point_size: float = 3.0,
+    robust_clip: float = 0.99,
+):
+    """Scatter buffer states in xy-space, colored by their projection onto each of
+    the top-`n_components` PCs of {name}(s).
+
+    For locomaze envs obs[:2] is xy, so this shows the *spatial* structure of the
+    representation: a healthy SR/Laplacian-style encoder gives low-frequency modes
+    over the reachable set in the top PCs and finer detail lower down. Red flags are
+    one PC carrying nearly all the variance (cf. top1_var_frac), or sharp jumps that
+    don't respect maze geometry. For ant the color is the PC of the *full*-state
+    embedding drawn at the agent's xy, so pose/velocity variation shows up as color
+    spread among nearby points -- expected, not a bug.
+    """
+    os.makedirs(save_dir, exist_ok=True)
+    enc = agent.psi if name == "psi" else agent.phi
+
+    B = states.shape[0]
+    if B > max_points:
+        states = states[torch.randperm(B, device=states.device)[:max_points]]
+    xy = states[:, :2].cpu().numpy()
+
+    feats = enc(states.to(agent.device))
+    k = min(n_components, feats.shape[1])
+    scores, var_frac, _ = _pca_scores(feats, k)
+    scores = scores.cpu().numpy()
+    var_frac = var_frac.cpu().numpy()
+
+    ncol = min(k, 3)
+    nrow = math.ceil(k / ncol)
+    fig, axes = plt.subplots(
+        nrow, ncol, figsize=(4.2 * ncol, 4.0 * nrow), squeeze=False
+    )
+    axes_flat = axes.ravel()
+
+    for c in range(k):
+        ax = axes_flat[c]
+        if env is not None:
+            _draw_maze_walls(ax, env)
+        v = scores[:, c]
+        lim = float(np.quantile(np.abs(v), robust_clip))  # symmetric, outlier-robust
+        lim = lim if lim > 0 else 1.0
+        sc = ax.scatter(
+            xy[:, 0],
+            xy[:, 1],
+            c=v,
+            cmap="RdBu_r",
+            vmin=-lim,
+            vmax=lim,
+            s=point_size,
+            alpha=0.6,
+            linewidths=0,
+            zorder=2,
+        )
+        ax.set_title(f"PC{c + 1}  ({100 * var_frac[c]:.1f}% var)", fontsize=9)
+        ax.set_aspect("equal", adjustable="box")
+        ax.grid(True, alpha=0.12, zorder=1)
+        fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+
+    for c in range(k, len(axes_flat)):
+        axes_flat[c].axis("off")
+
+    cum = 100 * var_frac[:k].sum()
+    fig.suptitle(
+        f"{name}(s) principal components in xy-space — step {step:,}  "
+        f"(top {k} = {cum:.1f}% var)",
+        fontsize=11,
+    )
+    fig.tight_layout()
+    path = os.path.join(save_dir, f"pca_{name}_step_{step:07d}.png")
+    fig.savefig(path, dpi=90, bbox_inches="tight")
+    plt.close(fig)
+    print(
+        f"        [pca-{name}] saved {path}  top{k} var = "
+        + ", ".join(f"{100 * f:.1f}%" for f in var_frac[:k])
+    )
+    return path
+
+
+@torch.no_grad()
+def _value_field(
+    agent,
+    bg_states: torch.Tensor,
+    z_vec: torch.Tensor,
+    n_actions: int = 16,
+    action_mode: str = "policy",  # "uniform": E_{a~U[-1,1]}; "policy": a=pi(s,z)
+) -> np.ndarray:
+    """V(s,z) = E_a <z, T_phi(phi(s), a, z)>  over background states.
+
+    phi(s) is computed once; only the action varies. "uniform" averages over the
+    action box, so it's actor-INDEPENDENT (a clean critic-only check); "policy"
+    uses pi(s,z) for the on-policy value (critic+actor together). Either way this
+    is the *future* value (T_phi predicts successor features from s' onward), so
+    read it as a basin that should rise toward the goal, not as immediate reward.
+    """
+    s = bg_states.to(agent.device)
+    phi_s = agent.phi(s)
+    z_b = z_vec.unsqueeze(0).expand(s.shape[0], -1).to(agent.device)
+    acc = torch.zeros(s.shape[0], device=agent.device)
+    K = n_actions if action_mode == "uniform" else 1
+    for _ in range(K):
+        if action_mode == "uniform":
+            a = torch.empty(
+                s.shape[0], agent.config.act_dim, device=agent.device
+            ).uniform_(-1.0, 1.0)
+        else:
+            a = agent.act(s, z_b)
+        acc += (agent.T_phi.predict(phi_s, a, z_b) * z_b).sum(-1)
+    return (acc / K).cpu().numpy()
+
+
+def _draw_field(ax, fig, bg_xy, vals, goal_xy):
+    """Scatter background colored by `vals`, mark the argmax, return goal percentile."""
+    lo, hi = np.percentile(vals, [2, 98])
+    sc = ax.scatter(
+        bg_xy[:, 0],
+        bg_xy[:, 1],
+        c=vals,
+        cmap="viridis",
+        vmin=lo,
+        vmax=hi,
+        s=6,
+        alpha=0.5,
+        linewidths=0,
+        zorder=1,
+    )
+    fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+    peak = bg_xy[int(vals.argmax())]
+    ax.scatter(
+        peak[0],
+        peak[1],
+        facecolors="none",
+        edgecolors="magenta",
+        s=140,
+        marker="D",
+        linewidths=1.5,
+        zorder=4,
+        label="peak",
+    )
+    goal_i = int(np.linalg.norm(bg_xy - goal_xy, axis=-1).argmin())
+    return float((vals <= vals[goal_i]).mean())
 
 
 # ---------- orchestrator ----------
@@ -574,6 +790,8 @@ def evaluate_zero_shot(
     step: int = 0,
     save_dir: str = "trajectories",
     run_calibration: bool = True,
+    plot_pca: bool = True,
+    pca_components: int = 6,
 ) -> Dict[int, float]:
     agent.eval_mode()
     tol = GOAL_TOL[morph]
@@ -624,16 +842,29 @@ def evaluate_zero_shot(
         print_predictor_z_sensitivity(agent, pool, z_per_task)
         if run_calibration:
             for task_id in sorted(z_per_task.keys()):
-                q_calibration(
+                q_calibration(agent, env, z_per_task[task_id], task_id)
+
+            latent_z = [
+                agent._project_z(torch.randn(agent.config.psi_dim)) for _ in range(5)
+            ]
+            for z in latent_z:
+                q_calibration(agent, env, z, random.randint(1, 5))
+
+        plot_trajectories(
+            agent, env, z_per_task, step=step, save_dir=save_dir, pool=pool
+        )
+
+        if plot_pca:
+            for nm in ("phi", "psi"):
+                plot_principal_components(
                     agent,
-                    env,
-                    z_per_task[task_id],
-                    goal_per_task[task_id],
-                    tol,
-                    task_id=task_id,
-                    max_steps=max_steps,
+                    buffer_obs,
+                    step=step,
+                    name=nm,
+                    n_components=pca_components,
+                    save_dir=save_dir,
+                    env=env,
                 )
-        plot_trajectories(agent, env, z_per_task, step=step, save_dir=save_dir)
 
     agent.train_mode()
     return out
