@@ -314,12 +314,16 @@ class Actor(nn.Module):
         activation=nn.ReLU,
     ):
         super().__init__()
-        self.net = _build_mlp(state_dim + z_dim, action_dim, hidden_dims, activation)
+        self.s = _build_embedding(state_dim, hidden_dims[0], hidden_dims[0], 1)
+        self.sz = _build_embedding(state_dim + z_dim, hidden_dims[0], hidden_dims[0], 1)
+        self.net = _build_mlp(hidden_dims[0]*2, action_dim, hidden_dims, activation)
 
     @override
     def forward(self, obs, z):
-        input = torch.cat([obs, z], dim=-1)
-        return torch.tanh(self.net(input))
+        s = self.s(obs)
+        sz = self.sz(torch.cat([obs, z], dim=-1))
+        net_in = torch.cat([s, sz], dim=-1)
+        return torch.tanh(self.net(net_in))
 
     def sample_action(self, obs, z, stddev=0.1, stddev_clip=0.3):
         act = self.forward(obs, z)

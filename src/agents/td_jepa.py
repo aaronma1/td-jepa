@@ -1,12 +1,13 @@
 import copy
 import math
+import os
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sympy.printing.lambdarepr import k
 
-from networks import ActorConfig, EncoderConfig, FbConfig
+from agents.networks import ActorConfig, EncoderConfig, FbConfig
 
 torch.set_default_dtype(torch.float32)
 
@@ -340,8 +341,40 @@ class TD_JEPA:
         _ema(self.T_phi_t, self.T_phi, self.config.tau_predictor)
         _ema(self.T_psi_t, self.T_psi, self.config.tau_predictor)
 
-    def save_state(self, save_path):
-        pass
+    # --- Checkpointing -----------------------------------------------------
+
+    _MODULES = ("phi", "psi", "T_phi", "T_psi", "actor", "phi_t", "psi_t", "T_phi_t", "T_psi_t")
+
+    def state_dict(self, include_optimizers=True):
+        sd = {
+            "modules": {n: getattr(self, n).state_dict() for n in self._MODULES},
+            "z_cov": self._z_cov.detach().clone(),
+        }
+        if include_optimizers:
+            sd["optimizers"] = {
+                "opt_actor": self.opt_actor.state_dict(),
+                "opt_critic": self.opt_critic.state_dict(),
+            }
+        return sd
+
+    def load_state_dict(self, sd):
+        for n, msd in sd["modules"].items():
+            getattr(self, n).load_state_dict(msd)
+        self._z_cov = sd["z_cov"].to(self.train_device)
+        for n, osd in sd.get("optimizers", {}).items():
+            getattr(self, n).load_state_dict(osd)
+
+    def save_state(self, save_path, include_optimizers=True, **extra):
+        """Atomically write agent state (+ any `extra` entries) to `save_path`."""
+        ckpt = {**extra, **self.state_dict(include_optimizers)}
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        tmp = save_path + ".tmp"
+        torch.save(ckpt, tmp)
+        os.replace(tmp, save_path)
 
     def load_state(self, save_path):
-        pass
+        """Load agent state from `save_path`; returns the full checkpoint dict."""
+        ckpt = torch.load(save_path, map_location=self.train_device, weights_only=True)
+        self.load_state_dict(ckpt)
+        self.train_mode()
+        return ckpt
