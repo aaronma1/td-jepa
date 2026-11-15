@@ -1,5 +1,22 @@
+"""TD-JEPA networks: encoders (phi / psi), twin-head predictors (T_phi / T_psi), actor.
+
+Every architectural difference between the two flavours we train is a config knob, so
+the params file fully determines the network (.params/tdj_*_params.yaml):
+
+  OGBench (this repo's tuned antmaze/pointmaze config — the knob defaults)
+    * predictor embeddings end in a Linear (no activation), orthogonal gain 1
+    * actor heads: full-width embeddings with torch default init
+    * actor body: Linear -> LayerNorm -> ReLU -> ..., hard clamp of noisy actions
+
+  DMC (BSynth JAX port == official metamotivo td_jepa)
+    * encoder with n_hidden=0 is a single Linear (+ norm)
+    * predictor embeddings end in Linear -> ReLU, orthogonal gain sqrt(2)
+    * actor heads: half-width embeddings ending in ReLU, orthogonal init
+    * actor body without LayerNorm, straight-through clamp of noisy actions
+"""
+
 import math
-from typing import Iterable
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -7,409 +24,233 @@ import torch.nn.functional as F
 from typing_extensions import override
 
 
-class EncoderConfig:
-    def __init__(
-        self, n_hidden: int, width: int, normalize_out: bool = True, siren_encoder=False
-    ):
-        self.n_hidden = n_hidden
-        self.width = width
-        self.normalize_out = normalize_out
-        self.siren_encoder = siren_encoder
-
-    def build_network(self, s_dim, out_dim):
-
-        if self.siren_encoder:
-            return SIRENEncoder(
-                s_dim,
-                out_dim,
-                self.width,
-                self.n_hidden,
-                normalize_representation=self.normalize_out,
-            )
-
-        return StateEncoder(
-            s_dim,
-            out_dim,
-            self.width,
-            self.n_hidden,
-            normalize_representation=self.normalize_out,
-        )
+# ─── Building blocks ────────────────────────────────────────────────────────
 
 
-class FbConfig:
-    def __init__(self, width: int, n_sa: int, n_sz: int, n_shared: int):
-        self.width = width
-        self.n_sa = n_sa
-        self.n_sz = n_sz
-        self.n_shared = n_shared
-
-    def build_network(self, s_dim, a_dim, z_dim, out_dim):
-        return FB_Predictor(
-            s_dim,
-            a_dim,
-            z_dim,
-            out_dim,
-            hidden_width=self.width,
-            n_sa=self.n_sa,
-            n_sz=self.n_sz,
-            n_shared=self.n_shared,
-        )
-
-
-class ActorConfig:
-    def __init__(self, width: int, depth: int):
-        self.width = width
-        self.depth = depth
-
-    def build_network(self, s_dim, z_dim, act_dim):
-        layers = [self.width] * self.depth
-        return Actor(s_dim, z_dim, act_dim, hidden_dims=layers)
-
-
-def _build_mlp(
-    input_dim: int,
-    output_dim: int,
-    hidden_dims,
-    input_activation=nn.Tanh,
-    activation=nn.ReLU,
-):
-    layers = []
-    layers += [
-        nn.Linear(input_dim, hidden_dims[0]),
-        nn.LayerNorm(hidden_dims[0]),
-        input_activation(),
-    ]
-
-    last_dim = hidden_dims[0]
-    for i in hidden_dims[1:]:
-        layers.append(nn.Linear(last_dim, i))
-        layers.append(activation())
-        last_dim = i
-    layers.append(torch.nn.Linear(last_dim, output_dim))
-
-    for m in layers:
-        if isinstance(m, torch.nn.Linear):
-            nn.init.orthogonal_(m.weight)
-            nn.init.zeros_(m.bias)
+def mlp(in_dim, out_dim, width, depth, first_act=nn.Tanh, layernorm=True, out_relu=False):
+    """Linear(in, w) [-> LayerNorm] -> first_act -> [Linear(w, w) -> ReLU] * (depth - 1)
+    -> Linear(w, out) [-> ReLU].  depth < 1 behaves like depth 1."""
+    layers = [nn.Linear(in_dim, width)]
+    if layernorm:
+        layers.append(nn.LayerNorm(width))
+    layers.append(first_act())
+    for _ in range(depth - 1):
+        layers += [nn.Linear(width, width), nn.ReLU()]
+    layers.append(nn.Linear(width, out_dim))
+    if out_relu:
+        layers.append(nn.ReLU())
     return nn.Sequential(*layers)
 
 
-def _build_embedding(
-    input_dim: int,
-    output_dim: int,
-    width: int,
-    depth: int,
-    input_activation=nn.Tanh,
-    hidden_activation=nn.ReLU,
-):
+def orthogonal_init_(module, gain=1.0):
+    """Orthogonal weights / zero biases on every Linear in `module`; LayerNorm reset."""
+    for m in module.modules():
+        if isinstance(m, nn.Linear):
+            nn.init.orthogonal_(m.weight, gain=gain)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
 
-    seq = [
-        nn.Linear(input_dim, width),
-        nn.LayerNorm(width),
-        input_activation(),
-    ]
-    for i in range(1, depth):
-        seq += [nn.Linear(width, width), hidden_activation()]
-    seq += [nn.Linear(width, output_dim)]
 
-    return nn.Sequential(*seq)
+def norm_z(z):
+    """Project to ||z|| = sqrt(d)."""
+    return math.sqrt(z.shape[-1]) * F.normalize(z, dim=-1)
+
+
+# ─── Encoders ────────────────────────────────────────────────────────────────
+
+
+class StateEncoder(nn.Module):
+    """Raw obs -> R^out_dim, orthogonal init (gain 1), optionally normed to sqrt(d).
+
+    n_hidden=0: single Linear (official BackwardMap(hidden_layers=0)).
+    n_hidden>=1: mlp(depth=n_hidden) = Linear -> LN -> Tanh -> [Linear -> ReLU]*(n-1) -> Linear.
+    """
+
+    def __init__(self, in_dim, out_dim, width, n_hidden, normalize_out=True):
+        super().__init__()
+        if n_hidden == 0:
+            self.net = nn.Sequential(nn.Linear(in_dim, out_dim))
+        else:
+            self.net = mlp(in_dim, out_dim, width, n_hidden)
+        self.normalize_out = normalize_out
+        orthogonal_init_(self)
+
+    @override
+    def forward(self, obs):
+        z = self.net(obs)
+        return norm_z(z) if self.normalize_out else z
 
 
 class SIRENEncoder(nn.Module):
-    class SineLayer(nn.Module):
-        """SIREN layer: sin(omega_0 * (Wx+b)) with Sitzmann et al. (2020) init."""
+    """Pointmaze encoder: 2 sine layers -> [Linear -> ReLU] * 2 -> Linear (fixed depth)."""
 
-        def __init__(self, in_features, out_features, is_first=False, omega_0=16.0):
+    class SineLayer(nn.Module):
+        """sin(omega_0 * (Wx + b)) with Sitzmann et al. (2020) init."""
+
+        def __init__(self, in_dim, out_dim, is_first=False, omega_0=16.0):
             super().__init__()
-            self.in_features = in_features
             self.omega_0 = omega_0
-            self.linear = nn.Linear(in_features, out_features)
+            self.linear = nn.Linear(in_dim, out_dim)
+            bound = (1.0 / in_dim) if is_first else (math.sqrt(6.0 / in_dim) / omega_0)
             with torch.no_grad():
-                bound = (
-                    (1.0 / in_features)
-                    if is_first
-                    else (math.sqrt(6.0 / in_features) / omega_0)
-                )
                 self.linear.weight.uniform_(-bound, bound)
                 self.linear.bias.zero_()
 
         def forward(self, x):
             return torch.sin(self.omega_0 * self.linear(x))
 
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int,
-        width: int,
-        depth: int,
-        activation=nn.ReLU,
-        normalize_representation=True,
-    ):
+    def __init__(self, in_dim, out_dim, width, normalize_out=True):
         super().__init__()
-
         self.embed = nn.Sequential(
-            SIRENEncoder.SineLayer(input_dim, width, is_first=True),
+            SIRENEncoder.SineLayer(in_dim, width, is_first=True),
             SIRENEncoder.SineLayer(width, width),
         )
-
         self.net = nn.Sequential(
-            nn.Linear(width, width),
-            nn.ReLU(),
-            nn.Linear(width, width),
-            nn.ReLU(),
-            nn.Linear(width, output_dim),
+            nn.Linear(width, width), nn.ReLU(),
+            nn.Linear(width, width), nn.ReLU(),
+            nn.Linear(width, out_dim),
         )
-
-        def init_orthogonal(module):
-            if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight)
-                if module.bias is not None:
-                    nn.init.zeros_(module.bias)
-
-        self.net.apply(init_orthogonal)
-
-        self.output_dim = output_dim
-        self.normalize_represenation = normalize_representation
+        orthogonal_init_(self.net)
+        self.normalize_out = normalize_out
 
     @override
     def forward(self, obs):
-        obs = 2 * (((obs + 2) / 25) - 0.5)
+        obs = 2 * (((obs + 2) / 25) - 0.5)  # pointmaze xy range -> ~[-1, 1]
         z = self.net(self.embed(obs))
-
-        if self.normalize_represenation:
-            z = math.sqrt(self.output_dim) * F.normalize(z, dim=-1)
-        return z
+        return norm_z(z) if self.normalize_out else z
 
 
-class StateEncoder(nn.Module):
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int,
-        width: int,
-        depth: int,
-        activation=nn.ReLU,
-        normalize_representation=True,
-    ):
-        super().__init__()
-        self.net = _build_embedding(
-            input_dim,
-            output_dim,
-            width,
-            depth,
-        )
-        self.output_dim = output_dim
-        self.normalize_represenation = normalize_representation
-        self.apply(self._init_weights)
-
-    @override
-    def forward(self, obs):
-        z = self.net(obs)
-        if self.normalize_represenation:
-            z = math.sqrt(self.output_dim) * F.normalize(z, dim=-1)
-        return z
-
-    @staticmethod
-    def _init_weights(m):
-        if isinstance(m, nn.Linear):
-            nn.init.orthogonal_(m.weight)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
-
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.ones_(m.weight)
-            nn.init.zeros_(m.bias)
+# ─── Predictor ───────────────────────────────────────────────────────────────
 
 
 class FB_Predictor(nn.Module):
-    def __init__(
-        self,
-        input_encoder_dim: int,
-        action_dim: int,
-        z_dim: int,
-        output_encoder_dim: int,
-        hidden_width: int = 512,
-        n_sa: int = 2,
-        n_sz: int = 2,
-        n_shared: int = 2,
-        n_parallel: int = 2,
-    ):
+    """Twin-head F(s_emb, a, z) -> out_dim.
+
+    Each head: embed_sa(s, a) and embed_sz(s, z), both mlp(depth=n_sa / n_sz) -> width//2,
+    concatenated -> [Linear -> ReLU] * n_shared -> Linear(out).  forward() stacks the two
+    heads (2, B, out); predict() is their mean.
+    """
+
+    def __init__(self, s_dim, a_dim, z_dim, out_dim, width=512, n_sa=2, n_sz=2,
+                 n_shared=2, embed_out_relu=False, init_gain=1.0):
         super().__init__()
-        self.embed_sa = _build_embedding(
-            input_encoder_dim + action_dim,
-            hidden_width // 2,
-            hidden_width,
-            n_sa,
-        )
-        self.embed_sa2 = _build_embedding(
-            input_encoder_dim + action_dim,
-            hidden_width // 2,
-            hidden_width,
-            n_sa,
-        )
-
-        self.embed_sz = _build_embedding(
-            input_encoder_dim + z_dim,
-            hidden_width // 2,
-            hidden_width,
-            n_sz,
-        )
-        self.embed_sz2 = _build_embedding(
-            input_encoder_dim + z_dim,
-            hidden_width // 2,
-            hidden_width,
-            n_sz,
-        )
-
-        self.body = nn.Sequential(
-            nn.Linear(hidden_width, hidden_width),
-            nn.ReLU(),
-            nn.Linear(hidden_width, hidden_width),
-            nn.ReLU(),
-            nn.Linear(hidden_width, output_encoder_dim),
-        )
-        self.body2 = nn.Sequential(
-            nn.Linear(hidden_width, hidden_width),
-            nn.ReLU(),
-            nn.Linear(hidden_width, hidden_width),
-            nn.ReLU(),
-            nn.Linear(hidden_width, output_encoder_dim),
-        )
-
-        self.output_dim = output_encoder_dim
-        self.apply(self._init_weights)
-
-    @override
-    def forward(self, latent_obs, action, z):
-        sa = torch.cat([latent_obs, action], dim=-1)
-        sz = torch.cat([latent_obs, z], dim=-1)
-        h1 = torch.cat([self.embed_sa(sa), self.embed_sz(sz)], dim=-1)
-        h2 = torch.cat([self.embed_sa2(sa), self.embed_sz2(sz)], dim=-1)
-        out = torch.stack([self.body(h1), self.body2(h2)])
-        return out
-
-    def predict(self, latent_obs, action, z):
-        out = self.forward(latent_obs, action, z)
-        return (out[0] + out[1]) / 2
+        half = width // 2
+        sa = lambda: mlp(s_dim + a_dim, half, width, n_sa, out_relu=embed_out_relu)
+        sz = lambda: mlp(s_dim + z_dim, half, width, n_sz, out_relu=embed_out_relu)
+        self.embed_sa, self.embed_sa2 = sa(), sa()
+        self.embed_sz, self.embed_sz2 = sz(), sz()
+        self.body, self.body2 = self._body(width, out_dim, n_shared), self._body(width, out_dim, n_shared)
+        orthogonal_init_(self, init_gain)
 
     @staticmethod
-    def _init_weights(m):
-        if isinstance(m, nn.Linear):
-            nn.init.orthogonal_(m.weight)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
+    def _body(width, out_dim, n_shared):
+        layers = []
+        for _ in range(n_shared):
+            layers += [nn.Linear(width, width), nn.ReLU()]
+        return nn.Sequential(*layers, nn.Linear(width, out_dim))
 
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.ones_(m.weight)
-            nn.init.zeros_(m.bias)
+    @override
+    def forward(self, s_emb, action, z):
+        sa = torch.cat([s_emb, action], dim=-1)
+        sz = torch.cat([s_emb, z], dim=-1)
+        h1 = torch.cat([self.embed_sa(sa), self.embed_sz(sz)], dim=-1)
+        h2 = torch.cat([self.embed_sa2(sa), self.embed_sz2(sz)], dim=-1)
+        return torch.stack([self.body(h1), self.body2(h2)])
+
+    def predict(self, s_emb, action, z):
+        out = self.forward(s_emb, action, z)
+        return (out[0] + out[1]) / 2
+
+
+# ─── Actor ───────────────────────────────────────────────────────────────────
 
 
 class Actor(nn.Module):
-    def __init__(
-        self,
-        state_dim,
-        z_dim,
-        action_dim,
-        hidden_dims=(128, 128, 128),
-        activation=nn.ReLU,
-    ):
+    """Dual-head deterministic actor: tanh(net([s(obs), sz(obs, z)])).
+
+    Heads: mlp(depth=1) -> embed_dim (+ ReLU if embed_out_relu); torch default init
+    unless embed_orth_init.  Body: mlp(2*embed_dim -> act, depth, first_act=ReLU,
+    layernorm=body_layernorm), orthogonal init (gain 1).
+    """
+
+    def __init__(self, s_dim, z_dim, act_dim, width, depth, embed_dim=None,
+                 embed_out_relu=False, embed_orth_init=False, body_layernorm=True,
+                 straight_through_clamp=False):
         super().__init__()
-        self.s = _build_embedding(state_dim, hidden_dims[0], hidden_dims[0], 1)
-        self.sz = _build_embedding(state_dim + z_dim, hidden_dims[0], hidden_dims[0], 1)
-        self.net = _build_mlp(hidden_dims[0]*2, action_dim, hidden_dims, activation)
+        embed_dim = embed_dim or width
+        self.s = mlp(s_dim, embed_dim, width, 1, out_relu=embed_out_relu)
+        self.sz = mlp(s_dim + z_dim, embed_dim, width, 1, out_relu=embed_out_relu)
+        self.net = mlp(2 * embed_dim, act_dim, width, depth, first_act=nn.ReLU,
+                       layernorm=body_layernorm)
+        orthogonal_init_(self.net)
+        if embed_orth_init:
+            orthogonal_init_(self.s)
+            orthogonal_init_(self.sz)
+        self.straight_through_clamp = straight_through_clamp
 
     @override
     def forward(self, obs, z):
-        s = self.s(obs)
-        sz = self.sz(torch.cat([obs, z], dim=-1))
-        net_in = torch.cat([s, sz], dim=-1)
-        return torch.tanh(self.net(net_in))
+        h = torch.cat([self.s(obs), self.sz(torch.cat([obs, z], dim=-1))], dim=-1)
+        return torch.tanh(self.net(h))
 
-    def sample_action(self, obs, z, stddev=0.1, stddev_clip=0.3):
-        act = self.forward(obs, z)
-        noise = torch.randn_like(act) * stddev
-        noise = noise.clamp(-stddev_clip, stddev_clip)
-        return (act + noise).clamp(-1.0, 1.0)
+    def sample_action(self, obs, z, stddev, stddev_clip):
+        """Action + clipped Gaussian noise, clamped to [-1, 1].
 
-
-class WmConfig:
-    def __init__(self, width: int, n_sa: int, n_shared: int):
-        self.width = width
-        self.n_sa = n_sa
-        self.n_shared = n_shared
-
-    def build_network(self, s_dim, a_dim, out_dim):
-        return WmPredictor(
-            s_dim,
-            a_dim,
-            out_dim,
-            hidden_width=self.width,
-            n_sa=self.n_sa,
-            n_shared=self.n_shared,
-        )
+        straight_through_clamp (metamotivo): clamp to [-1+1e-6, 1-1e-6] in the forward
+        pass but pass gradients straight through, so saturated dims still train the actor.
+        """
+        x = self.forward(obs, z)
+        x = x +(torch.randn_like(x) * stddev).clamp(-stddev_clip, stddev_clip)
+        if self.straight_through_clamp:
+            eps = 1e-6
+            return x + (x.clamp(-1.0 + eps, 1.0 - eps) - x).detach()
+        return x.clamp(-1.0, 1.0)
 
 
-class WmPredictor(nn.Module):
-    def __init__(
-        self,
-        input_encoder_dim: int,
-        action_dim: int,
-        output_encoder_dim: int,
-        hidden_width: int = 512,
-        n_sa: int = 2,
-        n_shared: int = 2,
-        n_parallel: int = 2,
-    ):
-        super().__init__()
-        self.embed_sa = _build_embedding(
-            input_encoder_dim + action_dim,
-            hidden_width,
-            hidden_width,
-            n_sa,
-        )
-        self.embed_sa2 = _build_embedding(
-            input_encoder_dim + action_dim,
-            hidden_width,
-            hidden_width,
-            n_sa,
-        )
+# ─── Configs (one per network; fields map 1:1 onto the params file) ────────
 
-        self.body = nn.Sequential(
-            nn.Linear(hidden_width, hidden_width),
-            nn.ReLU(),
-            nn.Linear(hidden_width, hidden_width),
-            nn.ReLU(),
-            nn.Linear(hidden_width, output_encoder_dim),
-        )
-        self.body2 = nn.Sequential(
-            nn.Linear(hidden_width, hidden_width),
-            nn.ReLU(),
-            nn.Linear(hidden_width, hidden_width),
-            nn.ReLU(),
-            nn.Linear(hidden_width, output_encoder_dim),
-        )
 
-        self.output_dim = output_encoder_dim
-        self.apply(self._init_weights)
+@dataclass
+class EncoderConfig:
+    n_hidden: int
+    width: int
+    normalize_out: bool = True
+    siren_encoder: bool = False  # pointmaze; ignores n_hidden (fixed depth)
 
-    @override
-    def forward(self, obs, action):
-        sa = torch.cat([obs, action], dim=-1)
-        return torch.stack(
-            [self.body(self.embed_sa(sa)), self.body2(self.embed_sa2(sa))]
-        )
+    def build_network(self, s_dim, out_dim):
+        if self.siren_encoder:
+            return SIRENEncoder(s_dim, out_dim, self.width, self.normalize_out)
+        return StateEncoder(s_dim, out_dim, self.width, self.n_hidden, self.normalize_out)
 
-    def predict(self, obs, action):
-        p = self.forward(obs, action)
-        return (p[0] + p[1]) / 2
 
-    @staticmethod
-    def _init_weights(m):
-        if isinstance(m, nn.Linear):
-            nn.init.orthogonal_(m.weight)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
+@dataclass
+class FbConfig:
+    width: int
+    n_sa: int
+    n_sz: int
+    n_shared: int
+    embed_out_relu: bool = False
+    init_gain: float = 1.0
 
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.ones_(m.weight)
-            nn.init.zeros_(m.bias)
+    def build_network(self, s_dim, a_dim, z_dim, out_dim):
+        return FB_Predictor(s_dim, a_dim, z_dim, out_dim, self.width, self.n_sa, self.n_sz,
+                            self.n_shared, self.embed_out_relu, self.init_gain)
+
+
+@dataclass
+class ActorConfig:
+    width: int
+    depth: int
+    embed_dim: int | None = None  # None -> width
+    embed_out_relu: bool = False
+    embed_orth_init: bool = False
+    body_layernorm: bool = True
+    straight_through_clamp: bool = False
+
+    def build_network(self, s_dim, z_dim, act_dim):
+        return Actor(s_dim, z_dim, act_dim, self.width, self.depth, self.embed_dim,
+                     self.embed_out_relu, self.embed_orth_init, self.body_layernorm,
+                     self.straight_through_clamp)

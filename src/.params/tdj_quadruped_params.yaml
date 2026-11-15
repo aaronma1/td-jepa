@@ -1,0 +1,62 @@
+# TD-JEPA, DMC/ExORL proprio — read from the JAX port (~/Projects/BSynth):
+#   configs/agent/tdj.yaml (agent.*) + configs/config.yaml (repr_dim, gamma, usfa.*, eval.*).
+# BSynth key -> here:
+#   repr_dim -> psi_dim, pred_hid_dim -> T_*.width, pred_body_layers -> T_*.n_shared,
+#   pred_embed_depth=2 -> T_*.n_sa = n_sz = 1 + embed_out_relu (BSynth's depth counts the
+#     Linear(hid -> hid//2) + ReLU output layer; ours counts hidden Linears before it),
+#   actor_hid_dim/actor_layers -> actor.{width,depth} (heads hid//2 -> embed_dim),
+#   pred_lr -> T_phi_lr/T_psi_lr,
+#   tau -> tau_encoder/tau_predictor, goal_ratio -> train_goal_ratio,
+#   usfa.steps/batch_size -> total_steps/batch_size, eval.freq -> eval_every/checkpoint_every.
+train:
+  total_steps: 1_000_000        # usfa.steps
+  batch_size: 1024              # usfa.batch_size
+  log_every: 1000
+  eval_every: 100_000           # eval.freq
+  eval_episodes: 10             # eval.episodes
+  eval_max_steps: 1000          # eval.max_episode_steps
+  eval_inference_samples: 50_000  # eval.infer_samples
+  eval_verbose: false
+  eval_calibration: false
+  expl_alg: rnd                 # expl_alg
+  checkpoint_every: 100_000     # BSynth checkpoints at eval.freq
+
+agent:
+  phi_dim: 256
+  psi_dim: 50                   # repr_dim
+  phi: {n_hidden: 0, width: 256}   # single Linear + norm
+  psi: {n_hidden: 2, width: 256}
+  # predictors: init_gain = sqrt(2) (official DenseParallel orthogonal init)
+  T_phi: {width: 1024, n_sa: 1, n_sz: 1, n_shared: 1, embed_out_relu: true, init_gain: 1.4142135623730951}
+  T_psi: {width: 1024, n_sa: 1, n_sz: 1, n_shared: 1, embed_out_relu: true, init_gain: 1.4142135623730951}
+  actor:
+    width: 1024
+    depth: 1
+    embed_dim: 512              # actor_hid_dim // 2
+    embed_out_relu: true
+    embed_orth_init: true
+    body_layernorm: false
+    straight_through_clamp: true
+  actor_use_raw_obs: false      # official: actor consumes phi(s)
+  actor_bc_coeff: 0.0
+  actor_explore_stddev: 0.2
+  actor_explore_clip: 0.3
+  actor_grad_norm: 0.0          # <=0 disables clipping
+  ensemble_mean_targets: true   # both heads regress the target-ensemble mean
+  actor_reencode_phi: true      # actor uses phi(s) from the just-updated phi
+  adam_eps: 1.0e-8
+  phi_lr: 1.0e-4
+  psi_lr: 1.0e-4
+  T_phi_lr: 1.0e-4              # pred_lr
+  T_psi_lr: 1.0e-4              # pred_lr
+  actor_lr: 1.0e-4
+  tau_encoder: 0.001            # tau
+  tau_predictor: 0.001          # tau
+  tau_z_cov: 0.005              # hardcoded in BSynth train step
+  gamma: 0.98
+  lambda_phi: 0.1
+  lambda_psi: 0.1
+  latent_z_batch_size: 1
+  train_goal_ratio: 0.5         # goal_ratio
+  scale_train_goals: false
+  eval_device: cuda

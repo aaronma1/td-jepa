@@ -4,8 +4,6 @@ import os
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from sympy.printing.lambdarepr import k
 
 from agents.networks import ActorConfig, EncoderConfig, FbConfig
 
@@ -31,7 +29,7 @@ class TD_JEPA_CONFIG:
         T_phi_lr=1e-4,
         T_psi_lr=1e-4,
         actor_lr=1e-4,
-        adam_eps=1e-5,
+        adam_eps=1e-8,  # torch default; what every run so far actually used
         tau_predictor=0.005,
         tau_encoder=0.005,
         tau_z_cov=0.005,
@@ -42,6 +40,11 @@ class TD_JEPA_CONFIG:
         lambda_phi=1.0,
         lambda_psi=1.0,
         actor_bc_coeff=0.3,
+        actor_explore_stddev=0.1,
+        actor_explore_clip=0.3,
+        actor_grad_norm=1.0,  # <=0 disables actor grad clipping
+        ensemble_mean_targets=False,  # True: both heads regress the target-ensemble mean (BSynth/metamotivo)
+        actor_reencode_phi=False,  # True: actor sees phi(s) from the just-updated phi (BSynth/metamotivo)
         latent_z_batch_size=1,  # (D)
         train_goal_ratio=0.5,
         scale_train_goals=True,
@@ -77,8 +80,13 @@ class TD_JEPA_CONFIG:
         self.train_goal_ratio = train_goal_ratio
         self.lambda_phi = lambda_phi
         self.lambda_psi = lambda_psi
-        self.scale_train_goals = True
+        self.scale_train_goals = scale_train_goals
         self.actor_bc_coeff = actor_bc_coeff
+        self.actor_explore_stddev = actor_explore_stddev
+        self.actor_explore_clip = actor_explore_clip
+        self.actor_grad_norm = actor_grad_norm
+        self.ensemble_mean_targets = ensemble_mean_targets
+        self.actor_reencode_phi = actor_reencode_phi
         self.train_device = train_device
         self.eval_device = eval_device
 
@@ -151,14 +159,17 @@ class TD_JEPA:
         )
 
         # --- Separate optimisers (one per network), matching the reference
-        self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=config.actor_lr)
+        self.opt_actor = torch.optim.Adam(
+            self.actor.parameters(), lr=config.actor_lr, eps=config.adam_eps
+        )
         self.opt_critic = torch.optim.Adam(
             [
                 {"params": self.phi.parameters(), "lr": config.phi_lr},
                 {"params": self.psi.parameters(), "lr": config.psi_lr},
                 {"params": self.T_phi.parameters(), "lr": config.T_phi_lr},
                 {"params": self.T_psi.parameters(), "lr": config.T_psi_lr},
-            ]
+            ],
+            eps=config.adam_eps,
         )
 
     def train_mode(self):
@@ -190,11 +201,16 @@ class TD_JEPA:
         phi_embed_t = _tile(self.phi_t(next_states), D)
         psi_embed_t = _tile(self.psi_t(next_states), D)
         ns = _tile(next_states, D) if self.config.actor_use_raw_obs else phi_embed_t
-        next_actions = self.actor.sample_action(ns, z)
+        next_actions = self.actor.sample_action(
+            ns, z, self.config.actor_explore_stddev, self.config.actor_explore_clip
+        )
         bootstrap = 1 - _tile(terminals, D)
 
-        F_phi = self.T_phi_t(phi_embed_t, next_actions, z)
-        F_psi = self.T_psi_t(psi_embed_t, next_actions, z)
+        F_phi = self.T_phi_t(phi_embed_t, next_actions, z)  # (2, BD, psi_dim)
+        F_psi = self.T_psi_t(psi_embed_t, next_actions, z)  # (2, BD, phi_dim)
+        if self.config.ensemble_mean_targets:
+            F_phi = F_phi.mean(0, keepdim=True).expand_as(F_phi)
+            F_psi = F_psi.mean(0, keepdim=True).expand_as(F_psi)
 
         phi_target = (
             psi_embed_t.unsqueeze(0).repeat(2, 1, 1)
@@ -248,11 +264,16 @@ class TD_JEPA:
         self.ema()
         # compute actor loss
         self.T_phi.requires_grad_(False)
-        actor_input = (
-            _tile(states, D) if self.config.actor_use_raw_obs else phi_embed.detach()
+        if self.config.actor_reencode_phi:
+            with torch.no_grad():
+                phi_actor = _tile(self.phi(states), D)
+        else:
+            phi_actor = phi_embed.detach()
+        actor_input = _tile(states, D) if self.config.actor_use_raw_obs else phi_actor
+        actor_actions = self.actor.sample_action(
+            actor_input, z, self.config.actor_explore_stddev, self.config.actor_explore_clip
         )
-        actor_actions = self.actor.sample_action(actor_input, z)
-        F_actor = self.T_phi.predict(phi_embed.detach(), actor_actions, z)
+        F_actor = self.T_phi.predict(phi_actor, actor_actions, z)
         Qs = torch.einsum("Bi,Bi->B", F_actor, z)
         if self.config.actor_bc_coeff > 0:
             Qs = Qs / (Qs.abs().mean().detach())
@@ -265,7 +286,10 @@ class TD_JEPA:
         L_actor = -Qs.mean() + self.config.actor_bc_coeff * bc
         self.opt_actor.zero_grad(set_to_none=True)
         L_actor.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)
+        if self.config.actor_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(
+                self.actor.parameters(), self.config.actor_grad_norm
+            )
         self.opt_actor.step()
         self.T_phi.requires_grad_(True)
 

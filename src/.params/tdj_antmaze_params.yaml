@@ -1,0 +1,45 @@
+# TD-JEPA, OGBench antmaze proprio — paper Table 4 (the 0.98 antmaze-medium-navigate config).
+train:
+  total_steps: 1_000_000
+  batch_size: 256
+  log_every: 1000
+  eval_every: 10_000
+  eval_tasks: 5
+  eval_episodes: 10
+  eval_max_steps: 1000
+  eval_inference_samples: 50_000
+  shift_reward: 1.0
+  eval_verbose: true
+  eval_calibration: true
+  checkpoint_every: 50_000
+
+agent:
+  phi_dim: 256
+  psi_dim: 50
+  phi: {n_hidden: 4, width: 512}
+  psi: {n_hidden: 4, width: 512}
+  T_phi: {width: 512, n_sa: 2, n_sz: 2, n_shared: 2}
+  T_psi: {width: 512, n_sa: 2, n_sz: 2, n_shared: 2}
+  actor: {width: 512, depth: 4}
+  actor_use_raw_obs: true
+  ensemble_mean_targets: false  # per-head TD targets
+  actor_reencode_phi: false
+  adam_eps: 1.0e-8
+  actor_bc_coeff: 0.3
+  actor_explore_stddev: 0.1   # paper says 0.2 (deferred)
+  actor_explore_clip: 0.3
+  actor_grad_norm: 1.0
+  phi_lr: 1.0e-4
+  psi_lr: 1.0e-4
+  T_phi_lr: 1.0e-4
+  T_psi_lr: 1.0e-4
+  actor_lr: 1.0e-4
+  tau_encoder: 0.005
+  tau_predictor: 0.005
+  tau_z_cov: 0.005
+  gamma: 0.99
+  lambda_phi: 1.0
+  lambda_psi: 1.0
+  latent_z_batch_size: 1
+  train_goal_ratio: 0.5
+  scale_train_goals: true

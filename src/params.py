@@ -1,22 +1,44 @@
-"""Single source of truth for TD-JEPA hyperparameters.
+"""Params manager: hyperparameters live in .params/{bfm_name}_{env_name}_params.yaml.
 
-Every training script (train.py, train_mixed.py) reads its agent config and
-its training/eval settings from here.  CLI flags only override these values.
+Every training script (train.py, train_mixed.py, eval_checkpoint.py) reads its
+agent config and its training/eval settings through here.  CLI flags only
+override the values from the params file.
 
-  agent_config(env_name, obs_dim, act_dim) -> TD_JEPA_CONFIG
-  train_params(env_name, **overrides)      -> TrainParams
+Lookup for (bfm_name, env_name), first hit wins:
+  .params/{bfm}_{env_name}_params.yaml   e.g. tdj_antmaze-large-navigate-v0_params.yaml
+  .params/{bfm}_{family}_params.yaml     e.g. tdj_antmaze_params.yaml, tdj_walker_params.yaml
+where family is the DMC domain (walker_run -> walker) or the OGBench prefix
+(antmaze-medium-navigate-v0 -> antmaze).
+
+File layout:
+  train:  TrainParams fields (anything omitted keeps its dataclass default)
+  agent:  TD_JEPA_CONFIG kwargs, with sub-maps phi / psi (EncoderConfig),
+          T_phi / T_psi (FbConfig) and actor (ActorConfig).  obs_dim / act_dim
+          come from the dataset unless the file sets them.
+
+  agent_config(env_name, obs_dim, act_dim, bfm_name="tdj") -> TD_JEPA_CONFIG
+  train_params(env_name, bfm_name="tdj", **overrides)      -> TrainParams
 """
 
+import copy
+import dataclasses
 import os
 from dataclasses import dataclass, replace
+from functools import lru_cache
+from pathlib import Path
+
+import yaml
 
 from agents.networks import ActorConfig, EncoderConfig, FbConfig
 from agents.td_jepa import TD_JEPA_CONFIG
 
-# ─── Environments ────────────────────────────────────────────────────────────
+PARAMS_DIR = Path(__file__).resolve().parent / ".params"
+DEFAULT_BFM = "tdj"
 
 # ExORL / DMC lives in the BSynth checkout (exorl.dmc + exorl/datasets/...).
-BSYNTH_ROOT = os.path.expanduser("~/Documents/BSynth")
+BSYNTH_ROOT = os.path.expanduser("~/Projects/BSynth")
+
+# ─── Environments ────────────────────────────────────────────────────────────
 
 DMC_TASKS = {
     "walker": ["walker_flip", "walker_run", "walker_stand", "walker_walk"],
@@ -37,13 +59,19 @@ def is_dmc(env_name):
     return dmc_domain(env_name) is not None
 
 
+def env_family(env_name):
+    """'walker_run' -> 'walker', 'antmaze-medium-navigate-v0' -> 'antmaze'."""
+    return dmc_domain(env_name) or env_name.split("-")[0]
+
+
 # ─── Training / eval settings ───────────────────────────────────────────────
 
 
 @dataclass
 class TrainParams:
+    batch_size: int  # required: must be set in the params file's train section
+    bfm_name: str = DEFAULT_BFM  # selects .params/{bfm_name}_{env}_params.yaml
     total_steps: int = 1_000_000
-    batch_size: int = 256
     log_every: int = 1000
     eval_every: int = 10_000
     # eval
@@ -65,85 +93,70 @@ class TrainParams:
     resume: str = ""  # path to a checkpoint, or "latest" for <checkpoint_dir>/latest.pt
 
 
-def train_params(env_name, **overrides):
-    p = TrainParams()
-    if is_dmc(env_name):
-        p = replace(
-            p,
-            # Paper uses 1024; 512 to fit/finish on a GTX 1070.
-            batch_size=512,
-            eval_every=100_000,
-            eval_verbose=False,
-            eval_calibration=False,
-        )
-    return replace(p, **overrides)
+# ─── Params files ───────────────────────────────────────────────────────────
 
 
-# ─── Agent configs ──────────────────────────────────────────────────────────
+def params_path(env_name, bfm_name=DEFAULT_BFM):
+    names = dict.fromkeys([env_name, env_family(env_name)])  # ordered, deduped
+    tried = [PARAMS_DIR / f"{bfm_name}_{n}_params.yaml" for n in names]
+    for path in tried:
+        if path.exists():
+            return path
+    raise FileNotFoundError(
+        f"no params file for bfm={bfm_name!r} env={env_name!r}; tried: "
+        + ", ".join(str(p) for p in tried)
+    )
 
 
-def agent_config(env_name, obs_dim, act_dim):
-    if env_name.startswith("pointmaze"):
-        return TD_JEPA_CONFIG(
-            obs_dim=2,
-            act_dim=2,
-            phi_dim=64,
-            psi_dim=64,
-            phi_config=EncoderConfig(n_hidden=4, width=256, siren_encoder=True),
-            psi_config=EncoderConfig(n_hidden=4, width=256, siren_encoder=True),
-            T_phi_config=FbConfig(width=512, n_sa=3, n_sz=3, n_shared=3),
-            T_psi_config=FbConfig(width=512, n_sa=3, n_sz=3, n_shared=3),
-            actor_config=ActorConfig(width=256, depth=4),
-            actor_bc_coeff=0.3,
-            actor_use_raw_obs=True,
-            lambda_phi=2.0,
-            lambda_psi=2.0,
-            tau_encoder=0.005,
-            tau_predictor=0.005,
-            phi_lr=1e-5,
-            psi_lr=1e-5,
-            T_phi_lr=1e-3,
-            T_psi_lr=1e-3,
-            actor_lr=1e-4,
-            train_goal_ratio=0.125,
-            latent_z_batch_size=4,
+@lru_cache(maxsize=None)
+def _load(path):
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+    unknown = set(data) - {"train", "agent"}
+    if unknown:
+        raise ValueError(f"{path}: unknown top-level keys {sorted(unknown)}")
+    return data
+
+
+def load_params(env_name, bfm_name=DEFAULT_BFM):
+    """Raw {'train': {...}, 'agent': {...}} dict from the params file (a copy)."""
+    return copy.deepcopy(_load(params_path(env_name, bfm_name)))
+
+
+def train_params(env_name, bfm_name=DEFAULT_BFM, **overrides):
+    file_train = load_params(env_name, bfm_name).get("train") or {}
+    known = {f.name for f in dataclasses.fields(TrainParams)}
+    unknown = set(file_train) - (known - {"bfm_name"})
+    if unknown:
+        raise ValueError(
+            f"{params_path(env_name, bfm_name)}: unknown train keys {sorted(unknown)}"
         )
-    if env_name.startswith("antmaze"):
-        # Paper Table 4, OGBench proprio (the 0.98 antmaze-medium-navigate config).
-        return TD_JEPA_CONFIG(
-            obs_dim=29,
-            act_dim=8,
-            phi_dim=256,
-            psi_dim=50,
-            phi_config=EncoderConfig(n_hidden=4, width=512),
-            psi_config=EncoderConfig(n_hidden=4, width=512),
-            T_phi_config=FbConfig(width=512, n_sa=2, n_sz=2, n_shared=2),
-            T_psi_config=FbConfig(width=512, n_sa=2, n_sz=2, n_shared=2),
-            actor_config=ActorConfig(width=512, depth=4),
-            actor_bc_coeff=0.3,
-            actor_use_raw_obs=True,
-            lambda_phi=1.0,
-            lambda_psi=1.0,
-        )
-    if is_dmc(env_name):
-        # Paper Table 4, DMC proprio.
-        return TD_JEPA_CONFIG(
-            obs_dim=obs_dim,
-            act_dim=act_dim,
-            phi_dim=256,
-            psi_dim=50,
-            phi_config=EncoderConfig(n_hidden=0, width=256),
-            psi_config=EncoderConfig(n_hidden=2, width=256),
-            T_phi_config=FbConfig(width=1024, n_sa=3, n_sz=3, n_shared=3),
-            T_psi_config=FbConfig(width=1024, n_sa=3, n_sz=3, n_shared=3),
-            actor_config=ActorConfig(width=256, depth=3),
-            actor_bc_coeff=0.0,
-            actor_use_raw_obs=True,
-            lambda_phi=1.0,
-            lambda_psi=1.0,
-            gamma=0.98,
-            tau_encoder=0.001,
-            tau_predictor=0.001,
-            eval_device="cuda",
-        )
-    raise ValueError(f"no default config for env {env_name!r}")
+    if "batch_size" not in file_train:
+        raise ValueError(f"{params_path(env_name, bfm_name)}: train.batch_size is required")
+    return TrainParams(**{**file_train, **overrides, "bfm_name": bfm_name})
+
+
+_SUB_CONFIGS = {
+    "phi_config": ("phi", EncoderConfig),
+    "psi_config": ("psi", EncoderConfig),
+    "T_phi_config": ("T_phi", FbConfig),
+    "T_psi_config": ("T_psi", FbConfig),
+    "actor_config": ("actor", ActorConfig),
+}
+
+
+def agent_config(env_name, obs_dim, act_dim, bfm_name=DEFAULT_BFM):
+    if bfm_name != "tdj":
+        raise ValueError(f"no agent builder for bfm {bfm_name!r} (only 'tdj')")
+    kw = load_params(env_name, bfm_name).get("agent") or {}
+    path = params_path(env_name, bfm_name)
+    for arg, (key, cls) in _SUB_CONFIGS.items():
+        if key not in kw:
+            raise ValueError(f"{path}: agent.{key} is required")
+        kw[arg] = cls(**kw.pop(key))
+    kw.setdefault("obs_dim", obs_dim)
+    kw.setdefault("act_dim", act_dim)
+    try:
+        return TD_JEPA_CONFIG(**kw)
+    except TypeError as e:
+        raise ValueError(f"{path}: bad agent params ({e})") from e

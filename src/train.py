@@ -1,6 +1,7 @@
 """TD-JEPA training for OGBench and DMC (ExORL) environments.
 
-All hyperparameters come from params.py; CLI flags override them.
+All hyperparameters come from .params/{bfm_name}_{env_name}_params.yaml (see params.py);
+CLI flags override them.
 
 Usage:
   uv run train.py --env_name antmaze-medium-navigate-v0
@@ -74,11 +75,13 @@ def get_dataset_dmc(env_name, expl_alg, device="cuda"):
     obs, nobs, act, phy, term = [], [], [], [], []
     for p in paths:
         f = np.load(p)
+        # ExORL stores the action / physics / discount that *produced* observation[t] at
+        # index t, so transition obs[t] -> obs[t+1] uses index t+1 (as BSynth's dmc.py).
         obs.append(f["observation"][:-1])
         nobs.append(f["observation"][1:])
-        act.append(f["action"][:-1])
-        phy.append(f["physics"][:-1])
-        term.append((f["discount"].flatten()[:-1] == 0).astype(np.float32))
+        act.append(f["action"][1:])
+        phy.append(f["physics"][1:])
+        term.append((f["discount"].flatten()[1:] == 0).astype(np.float32))
     obs, nobs, act, phy, term = map(np.concatenate, (obs, nobs, act, phy, term))
     buf = _make_buffer(obs, act, nobs, term, physics=phy, device=device)
     print(
@@ -319,7 +322,7 @@ def build_and_train(run_name, env_name, buffer, eval_fn, tp: params.TrainParams,
                     meta=None, eval_suffix=""):
     """Build the agent for `env_name`, resume if requested, train, checkpoint."""
     obs_dim, act_dim = buffer.s.shape[1], buffer.a.shape[1]
-    config = params.agent_config(env_name, obs_dim, act_dim)
+    config = params.agent_config(env_name, obs_dim, act_dim, tp.bfm_name)
     config.train_device = tp.device
     agent = TD_JEPA(config)  # pyright: ignore[reportArgumentType]
     ckpt = Checkpointer(run_name, tp, {"env_name": env_name, "obs_dim": obs_dim,
@@ -339,7 +342,7 @@ def train(env_name, tp: params.TrainParams):
 
 
 def add_train_param_args(p: argparse.ArgumentParser):
-    """One flag per TrainParams field, defaulting to None (= use params.py)."""
+    """One flag per TrainParams field, defaulting to None (= use the params file)."""
     for f in dataclasses.fields(params.TrainParams):
         if f.type in (bool, "bool"):
             p.add_argument(f"--{f.name}", action=argparse.BooleanOptionalAction, default=None)

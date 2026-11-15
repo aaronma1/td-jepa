@@ -1,0 +1,38 @@
+# TD-JEPA, OGBench pointmaze (SIREN encoders).
+train:
+  total_steps: 1_000_000
+  batch_size: 256
+  eval_every: 10_000
+
+agent:
+  obs_dim: 2
+  act_dim: 2
+  phi_dim: 64
+  psi_dim: 64
+  # SIREN encoders have a fixed depth; n_hidden is ignored.
+  phi: {n_hidden: 4, width: 256, siren_encoder: true}
+  psi: {n_hidden: 4, width: 256, siren_encoder: true}
+  T_phi: {width: 512, n_sa: 3, n_sz: 3, n_shared: 2}
+  T_psi: {width: 512, n_sa: 3, n_sz: 3, n_shared: 2}
+  actor: {width: 256, depth: 4}
+  actor_use_raw_obs: true
+  ensemble_mean_targets: false  # per-head TD targets
+  actor_reencode_phi: false
+  adam_eps: 1.0e-8
+  actor_bc_coeff: 0.3
+  actor_explore_stddev: 0.1
+  actor_explore_clip: 0.3
+  actor_grad_norm: 1.0
+  phi_lr: 1.0e-5
+  psi_lr: 1.0e-5
+  T_phi_lr: 1.0e-3
+  T_psi_lr: 1.0e-3
+  actor_lr: 1.0e-4
+  tau_encoder: 0.005
+  tau_predictor: 0.005
+  gamma: 0.99
+  lambda_phi: 2.0
+  lambda_psi: 2.0
+  latent_z_batch_size: 4
+  train_goal_ratio: 0.125
+  scale_train_goals: true

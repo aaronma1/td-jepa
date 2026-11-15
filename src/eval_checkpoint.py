@@ -1,7 +1,7 @@
 """Load a TD-JEPA checkpoint written by train.py / train_mixed.py and run zero-shot eval.
 
 The env, obs/act dims and training params are read from the checkpoint; the
-agent config comes from params.py. Any TrainParams flag overrides eval settings.
+agent config comes from the .params file (see params.py). Any TrainParams flag overrides eval settings.
 
 Usage:
   uv run eval_checkpoint.py --ckpt checkpoints/antmaze-medium-navigate-v0/final.pt
@@ -38,7 +38,7 @@ def main():
     stored = {k: v for k, v in ckpt.get("train_params", {}).items() if k in known}
     tp = params.train_params(env_name, **{**stored, "resume": "", **cli_overrides(args)})
 
-    config = params.agent_config(env_name, ckpt["obs_dim"], ckpt["act_dim"])
+    config = params.agent_config(env_name, ckpt["obs_dim"], ckpt["act_dim"], tp.bfm_name)
     config.train_device = tp.device
     agent = TD_JEPA(config)  # pyright: ignore[reportArgumentType]
     agent.load_state_dict({k: ckpt[k] for k in ("modules", "z_cov")})
